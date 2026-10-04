@@ -11,7 +11,6 @@
 #include "gauge_ui.h"
 #include "kline.h"
 #include "gps.h"
-#include "ota_update.h"
 
 // ── SQXZ-PRO splash: full-color RGB565 image (320x240) ─────────────────────
 extern const uint16_t SQXZ_PRO_320x240[];
@@ -35,13 +34,10 @@ static volatile uint32_t g_watchdog_last_feed_ms = 0;
 static volatile bool g_watchdog_ready = false;
 static volatile bool g_touch_ready = false;
 
-// Same condition touch_read() uses: the IRQ pin must be low AND the pressure
-// reading valid. (touched() alone can read "down" spuriously on some CYD panels.)
-static bool touch_is_down() { return g_touch_ready && touch.tirqTouched() && touch.touched(); }
-
 uint32_t app_watchdog_feed_count() { return g_watchdog_feed_count; }
 uint32_t app_watchdog_last_feed_ms() { return g_watchdog_last_feed_ms; }
 bool app_watchdog_ready() { return g_watchdog_ready; }
+bool app_touch_ready() { return g_touch_ready; }
 
 static void app_watchdog_init() {
 #if ESP_IDF_VERSION_MAJOR >= 5
@@ -67,7 +63,7 @@ static void app_watchdog_init() {
 static void app_watchdog_feed() {
     if(!g_watchdog_ready) return;
     esp_task_wdt_reset();
-    g_watchdog_feed_count = g_watchdog_feed_count + 1;
+    g_watchdog_feed_count++;
     g_watchdog_last_feed_ms = millis();
 }
 
@@ -100,18 +96,10 @@ static void backlight_fade(uint8_t from, uint8_t to, uint16_t duration_ms) {
     const uint16_t step_delay = duration_ms / steps;
     for (uint8_t i = 1; i <= steps; i++) {
         const int v = from + (((int)to - (int)from) * (int)i) / steps;
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-        ledcWrite(BACKLIGHT_PIN, v);
-#else
         ledcWrite(BACKLIGHT_CHANNEL, v);
-#endif
         delay(step_delay);
     }
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-    ledcWrite(BACKLIGHT_PIN, to);
-#else
     ledcWrite(BACKLIGHT_CHANNEL, to); // land exactly on target, no rounding drift
-#endif
 }
 
 static inline int32_t touch_map_x(int32_t raw) {
@@ -124,16 +112,6 @@ static inline int32_t touch_map_y(int32_t raw) {
     return constrain(
         map((long)raw, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX, 0, SCREEN_HEIGHT - 1),
         0L, (long)SCREEN_HEIGHT - 1L);
-}
-
-// Mapped touch point for the boot-time WiFi setup screens (no LVGL running).
-static bool touch_get_mapped(int16_t *x, int16_t *y) {
-    if (!g_touch_ready) return false;
-    if (!(touch.tirqTouched() && touch.touched())) return false;
-    const TS_Point p = touch.getPoint();
-    *x = (int16_t)touch_map_x(p.x);
-    *y = (int16_t)touch_map_y(p.y);
-    return true;
 }
 
 void touch_read(lv_indev_drv_t *indev, lv_indev_data_t *data) {
@@ -166,11 +144,10 @@ void touch_read(lv_indev_drv_t *indev, lv_indev_data_t *data) {
             // Pages with their own release handlers (0 = menu screen).
             // Page 16 (DISTANCE TEST) also needs precise button hit-testing
             // for -/+/START-STOP/RESET, same reason pages 1/6/7 are here.
-            // Page 12 (ALARM) now cycles through a 2nd sub-view (PERFORMANCE)
-            // before returning to the menu, so it also needs the dedicated
-            // release handler instead of the generic "tap anywhere = menu".
+            // PAGE 12 remains a dedicated release page so its tap can advance to PAGE 13.
+            // PAGE 13 then uses the generic sequence handler to return to the menu.
             press_started_on_special_page =
-                (page == 0 || page == 1 || page == 3 || page == 6 || page == 7 || page == 8 || page == 12 || page == 16);
+                (page == 0 || page == 1 || page == 3 || page == 6 || page == 7 || page == 12 || page == 16);
             touch_sequence_valid = true;
         }
 
@@ -219,19 +196,9 @@ void setup() {
     // tft.init() already drove this pin HIGH via TFT_BL/TFT_BACKLIGHT_ON,
     // so attaching LEDC here and writing full brightness is a seamless
     // continuation rather than a glitchy re-configuration.
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-    // Arduino-ESP32 Core 3.x: LEDC channel is attached to the pin.
-    if(!ledcAttachChannel(BACKLIGHT_PIN, BACKLIGHT_FREQUENCY, BACKLIGHT_RES_BITS,
-                          BACKLIGHT_CHANNEL)) {
-        Serial.println("[BACKLIGHT] ledcAttachChannel failed");
-    }
-    ledcWrite(BACKLIGHT_PIN, (1 << BACKLIGHT_RES_BITS) - 1);
-#else
-    // Arduino-ESP32 Core 2.x compatibility.
     ledcSetup(BACKLIGHT_CHANNEL, BACKLIGHT_FREQUENCY, BACKLIGHT_RES_BITS);
     ledcAttachPin(BACKLIGHT_PIN, BACKLIGHT_CHANNEL);
     ledcWrite(BACKLIGHT_CHANNEL, (1 << BACKLIGHT_RES_BITS) - 1);
-#endif
 
     // Splash is drawn directly by TFT before LVGL starts.
     draw_sqxz_splash(tft);
@@ -256,28 +223,6 @@ void setup() {
     touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, CYD_TOUCH_CS);
     g_touch_ready = touch.begin(touchSPI);
     touch.setRotation(1);
-
-    // OTA update mode: hold a finger on the screen while powering on.
-    // Runs before LVGL/K-Line/GPS start, so WiFi+TLS has the whole heap and
-    // nothing else touches SPI/UART. Never returns (always reboots).
-    // Also a recovery path if a bad build crashes later in setup().
-    // The P08 UPDATE button also gets here (flag in NVS + reboot).
-    // The P08 WIFI / UPDATE buttons set a one-shot flag in NVS and reboot.
-    // Holding a finger on the screen while powering on also enters OTA mode.
-    const bool want_wifi_setup = ota_take_wifi_setup_request();
-    const bool want_ota_flag   = ota_take_request();
-    bool want_ota_touch = false;
-    if (touch_is_down()) { delay(80); want_ota_touch = touch_is_down(); }   // must stay down
-    Serial.printf("[BOOT] wifi_setup=%d ota_flag=%d ota_touch=%d\n",
-                  (int)want_wifi_setup, (int)want_ota_flag, (int)want_ota_touch);
-
-    if (want_wifi_setup || want_ota_flag || want_ota_touch) {
-        // The backlight was faded to 0 after the splash. Without this the OTA /
-        // WiFi-setup screens run but the panel looks dead (black).
-        backlight_fade(0, DEFAULT_BRIGHTNESS, 150);
-        if (want_wifi_setup) ota_wifi_setup_run(tft, touch_get_mapped);
-        ota_run(tft, touch_is_down);
-    }
 
     lv_init();
     lv_disp_draw_buf_init(&draw_buf, buf1, NULL, SCREEN_WIDTH * 20);

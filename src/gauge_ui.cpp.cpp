@@ -4,7 +4,6 @@
 #include <LittleFS.h>
 #include <esp_system.h>
 #include <Preferences.h>
-#include "ota_update.h"
 #include "gauge_ui.h"
 #include "app_config.h"
 #include "kline.h"
@@ -129,16 +128,21 @@ static float g_dist_run_max_rpm = 0.0f;
 static Preferences g_disttest_prefs;
 static bool g_disttest_prefs_ready = false;
 
-// ── หน้า 0: MENU — หน้าแรกสุดตอนบูท ใช้เลือกว่าจะไปหน้าไหนใน 16 หน้า ──
-// แตะแผ่นไหนในเมนู = ไปหน้านั้น, แล้วแตะอีกทีในหน้าปลายทาง = กลับมาหน้านี้
+// ── หน้า 0: MENU — หน้าแรกสุดตอนบูท ──────────────────────────────
+// หน้า 9, 11, 12, 13 ถูกผนวกรวมเป็นชุดย่อยของ PAGE 8 แล้ว
+// เมนูหลักจึงเหลือ 12 รายการ และจัดเป็นกริด 3 x 4 ให้สมดุลกับจอ 320x240
+// แตะแผ่นไหนในเมนู = ไปหน้านั้น, จากหน้า 8 ชุดย่อยจะไล่ต่อด้วยการแตะครั้งละ 1 หน้า
 static lv_obj_t *g_scr_menu = NULL;
 static lv_obj_t *g_menu_header = NULL;
 static lv_obj_t *g_menu_header_title = NULL;
 static lv_obj_t *g_menu_header_hint = NULL;
-static lv_obj_t *g_menu_tiles[16] = {NULL};
-static const char* MENU_TILE_LABEL[16] = {
-    "SETTINGS", "GAUGE-1", "SPEED-1", "GRAPH-1", "GRAPH-2", "DTC", "LOG",
-    "HEALTH", "WATCH", "SENSOR", "DATA", "ALARMS", "K-LINE", "SPEED-2", "GAUGE-2", "DIST"
+static lv_obj_t *g_menu_tiles[12] = {NULL};
+static const uint8_t MENU_PAGE_TARGET[12] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 10, 14, 15, 16
+};
+static const char* MENU_TILE_LABEL[12] = {
+    "SETTINGS", "GAUGE-1", "SPEED-1", "GRAPH-1", "GRAPH-2", "DTC",
+    "LOG", "HEALTH", "SENSOR", "SPEED-2", "GAUGE-2", "DIST"
 };
 static int8_t g_fuel_trim_pct = 0;
 static Preferences g_fueltrim_prefs;
@@ -195,10 +199,13 @@ static float g_tps_peak = 0.0f;
 static float g_ect_peak = 20.0f;
 
 
+extern const lv_font_t dseg7_24;
 extern const lv_font_t dseg7_32;
+extern const lv_font_t dseg7_48;
 extern const lv_font_t dseg7_60;
 extern const lv_font_t A4SPEED_26;
 extern const lv_font_t A4SPEED_36;
+extern const lv_font_t A4SPEED_50;
 extern const lv_font_t A4SPEED_14;
 extern const lv_font_t A4SPEED_16;
 
@@ -218,6 +225,13 @@ static bool g_afr_valid=false;
 // ── O2 median-of-3 pre-filter: ตัด spike 1 ตัวอย่างจาก noise บน K-line
 //    ก่อนเข้า EMA (คนละหน้าที่กับ EMA - median ตัด outlier แบบไม่หน่วง
 //    เวลา ส่วน EMA ทำให้ค่าไหลลื่น) ──────────────────────────────────
+static inline float median3(float a, float b, float c){
+    if(a>b){ float t=a; a=b; b=t; }
+    if(b>c){ float t=b; b=c; c=t; }
+    if(a>b){ float t=a; a=b; b=t; }
+    return b;
+}
+
 // ── EMA low-pass filter: prev + alpha*(raw-prev)
 //    alpha สูง = ตอบสนองไว/สมูทน้อย, alpha ต่ำ = สมูทมาก/ตอบสนองช้า ──
 static inline float ema(float prev, float raw, float alpha){
@@ -261,6 +275,7 @@ static lv_obj_t *g_scr_black = NULL;
 static lv_obj_t *g_lbl_speed_page = NULL;
 static lv_obj_t *g_lbl_speed_unit = NULL;
 static lv_obj_t *g_lbl_speed_max = NULL;
+static lv_obj_t *g_lbl_speed_iat = NULL;
 static lv_obj_t *g_lbl_speed_status = NULL;
 static lv_obj_t *g_lbl_speed_time = NULL;   // นาฬิกา GPS มุมขวาบนหน้า 2
 static lv_obj_t *g_lbl_gps_speed = NULL;    // ความเร็วจาก GPS (กล่องที่ 3 หน้า 2)
@@ -300,24 +315,6 @@ static bool g_dtc_page4_confirm_open = false;
 static lv_obj_t *g_dtc_page4_verify_overlay = NULL;
 static lv_obj_t *g_dtc_page4_verify_label = NULL;
 static bool g_dtc_page4_verify_open = false;
-static bool g_clear_dtc_awaiting_result = false;   // รอผล CLEAR DTC จาก K-Line task
-
-// เลย์เอาต์หน้า P06 (DTC) 320x240: ขอบบน/ล่าง 8 px และช่องไฟแนวตั้งเท่ากันทุกบรรทัด 8 px
-//   title 8-20 | conn 28-39 | card 47-123 | CLEAR 131-175 | result 183-195 | BACK 203-232
-//   การ์ด/ปุ่มกว้างเท่ากัน (284 px, ขอบซ้าย-ขวา 18 px) เพื่อให้แนวขอบตรงกัน
-#define DTC_MARGIN_X      18
-#define DTC_BLOCK_W       284
-#define DTC_CARD_Y        47
-#define DTC_CARD_H        76
-#define DTC_CLEAR_Y       131
-#define DTC_CLEAR_H       44
-#define DTC_RESULT_Y      183
-#define DTC_BACK_Y        203
-#define DTC_BACK_H        29
-// ตำแหน่งข้อความในการ์ด (พื้นที่ใช้งานสูง 72 px): โค้ด 1 บรรทัด + คำอธิบาย อยู่กึ่งกลางพอดี
-#define DTC_CODE_Y_NORMAL 18
-#define DTC_CODE_Y_MULTI  4
-#define DTC_DESC_Y        43
 
 static void dist_run_history_refresh(){
     for(int i=0;i<3;i++){
@@ -447,16 +444,6 @@ static uint8_t g_page = 0;
 // หน้า 12 (ALARM) ตอนนี้แยกเป็น 2 หน้าย่อยแตะสลับได้: 0=ALARM, 1=PERFORMANCE
 // (PERFORMANCE ย้ายมาจากหน้า 13 เดิม) แตะครั้งที่ 3 กลับไปเมนู
 static uint8_t g_page12_view = 0;
-// หน้า 8 (SYSTEM HEALTH) มี K-LINE TX/RX LOG รวมเป็นหน้าย่อย: 0=HEALTH, 1=K-LINE LOG
-// แตะครั้งที่ 1 = เปิด K-LINE LOG, แตะครั้งที่ 2 = กลับไปเมนู
-static uint8_t g_page8_view = 0;
-// P08 bottom buttons: WIFI (cycle network) and UPDATE (reboot into OTA mode)
-static lv_obj_t *g_p8_btn_wifi = nullptr, *g_p8_btn_update = nullptr;
-static lv_obj_t *g_p8_wifi_val = nullptr, *g_p8_wifi_cap = nullptr, *g_p8_update_val = nullptr, *g_p8_update_cap = nullptr;
-static uint32_t g_p8_wifi_armed_ms = 0;
-static bool     g_p8_wifi_armed = false;
-static uint32_t g_p8_update_armed_ms = 0;   // timestamp of the 1st tap (also used to time error messages)
-static bool     g_p8_update_armed = false;  // true only after the 1st valid tap
 
 void gauge_ui_update();
 
@@ -505,7 +492,9 @@ static bool color_eq(lv_color_t a, lv_color_t b){
 }
 
 static lv_color_t theme_bg(){ return g_day_mode ? DAY_BG : BG_BLACK; }
+static lv_color_t theme_panel(){ return g_day_mode ? DAY_PANEL : PANEL_DARK; }
 static lv_color_t theme_card(){ return g_day_mode ? DAY_CARD : PANEL_CARD; }
+static lv_color_t theme_btn(){ return g_day_mode ? DAY_BTN : BTN_NEUTRAL; }
 static lv_color_t theme_primary_text(){ return g_day_mode ? DAY_TEXT : WHITE; }
 // PAGE 14 live numeric readouts stay high-contrast: WHITE in NIGHT mode,
 // and the dark DAY_TEXT equivalent in DAY mode so the white DAY background
@@ -513,6 +502,7 @@ static lv_color_t theme_primary_text(){ return g_day_mode ? DAY_TEXT : WHITE; }
 // switch and on every live-value refresh.
 static lv_color_t page14_value_text(){ return g_day_mode ? DAY_TEXT : WHITE; }
 static lv_color_t theme_subtext(){ return g_day_mode ? DAY_SUBTEXT : GRAY_LBL; }
+static lv_color_t theme_line(){ return g_day_mode ? DAY_LINE : GRAY_LINE; }
 static lv_color_t theme_border(){ return g_day_mode ? DAY_BORDER : BORDER_SUBTLE; }
 static lv_color_t theme_grid(){ return g_day_mode ? DAY_GRID : GRAPH_GRID; }
 
@@ -536,13 +526,6 @@ static inline void set_bg_opa_if_changed(lv_obj_t *obj, lv_opa_t opa){
         lv_obj_set_style_bg_opa(obj, opa, 0);
     }
 }
-
-// ตัวเลขสเกลข้างกราฟ P04/P05: โหมดกลางวันใช้สีดำ, โหมดกลางคืนใช้สีเดิม (ฟ้า/เขียว/เหลือง)
-#define AXIS_LBL_MAX 24
-static lv_obj_t  *g_axis_lbls[AXIS_LBL_MAX];
-static lv_color_t g_axis_night_col[AXIS_LBL_MAX];
-static int        g_axis_lbl_n = 0;
-static lv_obj_t  *g_afr_grid = NULL;   // กริด P05
 
 static void theme_apply_obj(lv_obj_t *obj){
     if(!obj) return;
@@ -578,14 +561,10 @@ static void theme_apply_obj(lv_obj_t *obj){
         else if(color_eq(tc, DAY_SUBTEXT)) lv_obj_set_style_text_color(obj, GRAY_LBL, 0);
     }
 
-    if(obj == g_graph_rpm || obj == g_graph_speed || obj == g_afr_grid){
-        // พื้นหลัง/กรอบ/เส้นกริดของกราฟ P04 และ P05 ใช้สีเทาเข้มแบบกลางคืนทั้งสองโหมด
-        // เพื่อให้เส้นกราฟและกริดมองเห็นชัดแม้ในโหมดกลางวัน
-        if(obj != g_graph_speed){   // g_graph_speed โปร่งใสซ้อนบน g_graph_rpm
-            lv_obj_set_style_bg_color(obj, PANEL_DARK, 0);
-            lv_obj_set_style_border_color(obj, GRAPH_GRID, 0);
-        }
-        lv_obj_set_style_line_color(obj, GRAPH_GRID, LV_PART_MAIN);
+    if(obj == g_graph_rpm || obj == g_graph_speed){
+        lv_obj_set_style_bg_color(obj, theme_card(), 0);
+        lv_obj_set_style_border_color(obj, theme_border(), 0);
+        lv_obj_set_style_line_color(obj, theme_grid(), LV_PART_MAIN);
     }
 
     uint32_t i = 0; lv_obj_t *child;
@@ -597,8 +576,6 @@ static void settings_apply_theme(){
                          g_scr_health, g_scr_watchdog, g_scr_sensors, g_scr_data_logger, g_scr_alarm, g_scr_performance, g_scr_fueltrim,
                          g_scr_fuel_table, g_scr_disttest};
     for(auto r : roots) if(r) theme_apply_obj(r);
-    for(int i=0;i<g_axis_lbl_n;i++) if(g_axis_lbls[i])
-        lv_obj_set_style_text_color(g_axis_lbls[i], g_day_mode ? lv_color_hex(0x000000) : g_axis_night_col[i], 0);
 
     // PAGE 14 RPM bar uses a dark track/tick surface in both DAY and NIGHT.
     // The PAGE 14 screen itself still follows DAY/NIGHT; only this bar remains
@@ -675,12 +652,12 @@ static void settings_apply_theme(){
             lv_obj_set_style_text_color(g_menu_header_title, WHITE, 0);
             lv_obj_set_style_text_color(g_menu_header_hint, WHITE, 0);
         }
-        for(int i = 0; i < 16; ++i){
+        for(int i = 0; i < 12; ++i){
             lv_obj_t *tile = g_menu_tiles[i];
             if(!tile) continue;
             const bool locked = false;
             lv_obj_set_style_bg_color(tile, locked ? ACCENT_ERR : theme_card(), 0);
-            // SELECT PAGE ใช้กรอบสีเขียวเป็นเอกลักษณ์ทั้ง 16 ช่อง
+            // SELECT PAGE ใช้กรอบสีเขียวเป็นเอกลักษณ์ทั้ง 12 ช่อง
             lv_obj_set_style_border_color(tile, ACCENT_OK, 0);
             lv_obj_set_style_border_width(tile, locked ? 2 : 1, 0);
             lv_obj_t *num = lv_obj_get_child(tile, 0);
@@ -701,17 +678,6 @@ static lv_obj_t* mk_label(lv_obj_t *parent,const lv_font_t*f,lv_color_t col,
     lv_obj_set_style_text_color(l,col,0);
     lv_label_set_text(l,txt);
     lv_obj_align(l,al,ox,oy);
-    return l;
-}
-
-static lv_obj_t* axis_label(lv_obj_t *parent,const lv_font_t*f,lv_color_t col,const char*t,
-                            lv_align_t a,int x,int y){
-    lv_obj_t *l = mk_label(parent,f,col,t,a,x,y);
-    if(g_axis_lbl_n < AXIS_LBL_MAX){
-        g_axis_lbls[g_axis_lbl_n] = l;
-        g_axis_night_col[g_axis_lbl_n] = col;
-        g_axis_lbl_n++;
-    }
     return l;
 }
 
@@ -742,6 +708,7 @@ static lv_obj_t* mk_menu_btn(lv_obj_t *parent, int x, int y, int w, int h,
 static lv_obj_t* mk_stat_col(lv_obj_t *parent, int x, int y, int w, int h,
                               const char *caption, lv_color_t /*accent*/,
                               lv_obj_t **out_value){
+    const int GAP=3;   // ช่องไฟภายในกริด ลดเล็กน้อยเพื่อเพิ่มพื้นที่ข้อความ
     lv_obj_t *col=lv_obj_create(parent);
     lv_obj_set_pos(col,x,y);
     lv_obj_set_size(col,w,h);
@@ -784,22 +751,16 @@ static lv_obj_t* mk_stat_col(lv_obj_t *parent, int x, int y, int w, int h,
 
 
 // ── Extended page helpers ──────────────────────────────────────────────────
-static lv_obj_t* ext_screen_ex(const char *title, int page_no, bool show_title){
+static lv_obj_t* ext_screen(const char *title, int page_no){
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(scr, BG_BLACK, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
-    if(show_title){
-        char t[40]; snprintf(t, sizeof(t), "PAGE %d  %s", page_no, title);
-        mk_label(scr, &A4SPEED_16, ACCENT_BLUE, t, LV_ALIGN_TOP_MID, 0, 5);
-    }
+    char t[40]; snprintf(t, sizeof(t), "PAGE %d  %s", page_no, title);
+    mk_label(scr, &A4SPEED_16, ACCENT_BLUE, t, LV_ALIGN_TOP_MID, 0, 5);
     return scr;
-}
-
-static lv_obj_t* ext_screen(const char *title, int page_no){
-    return ext_screen_ex(title, page_no, true);
 }
 
 static lv_obj_t* ext_metric(lv_obj_t *parent, int x, int y, int w, int h, const char *name, lv_obj_t **out){
@@ -854,37 +815,8 @@ static const char* reset_reason_name(){
     }
 }
 
-// ── LittleFS housekeeping ────────────────────────────────────
-// ไฟล์ log แบบ append ต้องมีเพดานขนาด ไม่งั้นพาร์ทิชัน (~1.5 MB) เต็มแล้วเขียนไม่ได้
-// เมื่อเกินเพดานจะย้ายเป็น <ชื่อ>.old (ทับ .old เดิม) แล้วเริ่มไฟล์ใหม่
-constexpr size_t   LOG_APPEND_MAX_BYTES = 32 * 1024;
-constexpr uint32_t LOG_RUN_FILE_SLOTS   = 20;          // run_000..run_019 วนทับ
-constexpr size_t   LOG_RUN_RESERVE_BYTES = 28 * 1024;  // เผื่อไฟล์ run หนึ่งไฟล์ (300 sample)
-
-static void logger_rotate_if_big(const char *path){
-    if(!g_logger_fs_ready || !LittleFS.exists(path)) return;
-    File f = LittleFS.open(path, FILE_READ);
-    if(!f) return;
-    const size_t sz = f.size();
-    f.close();
-    if(sz < LOG_APPEND_MAX_BYTES) return;
-    char old_path[48];
-    snprintf(old_path, sizeof(old_path), "%s.old", path);
-    if(LittleFS.exists(old_path)) LittleFS.remove(old_path);
-    LittleFS.rename(path, old_path);
-}
-
-static bool logger_fs_has_room(size_t need){
-    if(!g_logger_fs_ready) return false;
-    const size_t total = LittleFS.totalBytes();
-    const size_t used  = LittleFS.usedBytes();
-    return total > used && (total - used) >= need;
-}
-
 static void logger_append_event(const char *type, const char *detail){
     if(!g_logger_fs_ready || !type || !detail) return;
-    logger_rotate_if_big("/events.csv");
-    if(!logger_fs_has_room(4096)) return;
     File f = LittleFS.open("/events.csv", FILE_APPEND);
     if(!f) return;
     if(f.size() == 0) f.println("ms,session,event,detail");
@@ -946,14 +878,7 @@ static void logger_update_session_stats(){
 static void logger_write_session(){
     if(!g_logger_fs_ready || g_logger_sample_count == 0) return;
     char path[40];
-    snprintf(path, sizeof(path), "/run_%03lu.csv", (unsigned long)(g_logger_session_count % LOG_RUN_FILE_SLOTS));
-    // ไฟล์ slot เดิมจะถูกทับ จึงนับพื้นที่ที่คืนมาด้วย; ถ้ายังไม่พอก็ข้ามรอบนี้ ดีกว่าเขียนครึ่งไฟล์
-    size_t reclaim = 0;
-    if(LittleFS.exists(path)){
-        File old = LittleFS.open(path, FILE_READ);
-        if(old){ reclaim = old.size(); old.close(); }
-    }
-    if(!logger_fs_has_room(LOG_RUN_RESERVE_BYTES > reclaim ? LOG_RUN_RESERVE_BYTES - reclaim : 0)) return;
+    snprintf(path, sizeof(path), "/run_%03lu.csv", (unsigned long)(g_logger_session_count % 1000));
     File f = LittleFS.open(path, FILE_WRITE);
     if(!f) return;
     f.println("ms,session,rpm,speed_kmh,tps_pct,ect_c,battery_v,inj_ms,ign_deg,afr_est,trip_km,gps_quality");
@@ -978,7 +903,6 @@ static void logger_write_session(){
     strncpy(g_logger_last_file, path+1, sizeof(g_logger_last_file)-1);
     g_logger_last_file[sizeof(g_logger_last_file)-1] = '\0';
 
-    logger_rotate_if_big("/run_summary.csv");
     File sf = LittleFS.open("/run_summary.csv", FILE_APPEND);
     if(sf){
         if(sf.size()==0) sf.println("session,duration_s,trip_km,max_rpm,min_rpm,max_speed,min_speed,max_ect,min_ect,max_tps,min_tps,min_batt,max_batt,min_afr,max_afr");
@@ -1038,9 +962,9 @@ static void extended_pages_init(){
     // PAGE 8: SYSTEM HEALTH CENTER
     // One compact dashboard: 4 live status cards, 3 heap figures, uptime and
     // the reset reason. Values stay short so they remain readable on 320x240.
-    g_scr_health = ext_screen_ex("SYSTEM HEALTH", 8, false);   // no title bar: more room for the buttons
+    g_scr_health = ext_screen("SYSTEM HEALTH", 8);
 
-    const int STATUS_Y = 6;
+    const int STATUS_Y = 38;
     const int STATUS_H = 44;
 
     // PAGE 8: wider ECU/GPS cards to prevent status text overflow.
@@ -1052,7 +976,7 @@ static void extended_pages_init(){
     // Heap Monitor: three equal columns, intentionally compact to leave room
     // for uptime/reset without making the page feel crowded.
     lv_obj_t *heap_card = lv_obj_create(g_scr_health);
-    lv_obj_set_pos(heap_card, 7, 56);
+    lv_obj_set_pos(heap_card, 7, 88);
     lv_obj_set_size(heap_card, 306, 64);
     lv_obj_clear_flag(heap_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(heap_card, PANEL_CARD, 0);
@@ -1098,30 +1022,8 @@ static void extended_pages_init(){
     // Bottom diagnostics: human-readable uptime and the reset reason captured
     // at boot. Keeping them separate prevents long reset strings from colliding
     // with the uptime value.
-    ext_metric(g_scr_health, 7, 126, 148, 50, "UPTIME", &g_health_values[4]);
-    ext_metric(g_scr_health, 165, 126, 148, 50, "RESET", &g_health_reset);
-
-    // Bottom buttons. Hit-testing is done in gauge_ui_handle_touch_release().
-    {
-        const int BY = 184, BH = 48;
-        // WIFI: shows the saved SSID, tap twice = reboot into on-device WiFi setup
-        g_p8_btn_wifi = ext_metric(g_scr_health, 7, BY, 148, BH, "WIFI  (TAP = SETUP)", &g_p8_wifi_val);
-        lv_obj_set_style_border_color(g_p8_btn_wifi, ACCENT_BLUE, 0);
-        lv_obj_set_style_border_width(g_p8_btn_wifi, 2, 0);
-        lv_label_set_long_mode(g_p8_wifi_val, LV_LABEL_LONG_CLIP);
-        g_p8_wifi_cap = lv_obj_get_child(g_p8_btn_wifi, 1);
-        const char *saved = ota_wifi_ssid();
-        lv_label_set_text(g_p8_wifi_val, saved[0] ? saved : "SET WIFI");
-        lv_obj_set_style_text_color(g_p8_wifi_val, saved[0] ? WHITE : ACCENT_WARN, 0);
-
-        // UPDATE: tap twice (safety), only when stopped
-        g_p8_btn_update = ext_metric(g_scr_health, 165, BY, 148, BH, "FW v" APP_VERSION, &g_p8_update_val);
-        lv_obj_set_style_border_color(g_p8_btn_update, ACCENT_OK, 0);
-        lv_obj_set_style_border_width(g_p8_btn_update, 2, 0);
-        lv_label_set_text(g_p8_update_val, "UPDATE");
-        lv_obj_set_style_text_color(g_p8_update_val, ACCENT_OK, 0);
-        g_p8_update_cap = lv_obj_get_child(g_p8_btn_update, 1);
-    }
+    ext_metric(g_scr_health, 7, 160, 148, 50, "UPTIME", &g_health_values[4]);
+    ext_metric(g_scr_health, 165, 160, 148, 50, "RESET", &g_health_reset);
 
 
     // PAGE 9: WATCHDOG / RESET
@@ -1174,7 +1076,7 @@ static void extended_pages_init(){
     // เดิมหน้านี้มีกล่อง TARGET FUEL TRIM, ปุ่ม -/+, สถานะ ECU WRITE, ปุ่ม APPLY
     // และ log แค่ 3 บรรทัด — ตอนนี้เอาออกทั้งหมด เหลือ log เต็มหน้าจอ
     // (ใหม่สุดอยู่บนสุด: บรรทัดแรก = TX, ตามด้วย RX ที่ตัดบรรทัดอัตโนมัติ)
-    g_scr_fuel_table = ext_screen("K-LINE TX / RX LOG", 8);
+    g_scr_fuel_table = ext_screen("K-LINE TX / RX LOG", 13);
 
     g_kline_log_label = lv_label_create(g_scr_fuel_table);
     lv_obj_set_style_text_font(g_kline_log_label, &lv_font_montserrat_10, 0);
@@ -1753,6 +1655,10 @@ static void disttest_reset(){
 
 // หน้า 16 เป็น AUTO START เต็มรูปแบบ: ปุ่มซ้ายเป็นเพียงตัวบอกโหมด
 // การเริ่ม/หยุดรอบทำโดย GPS อัตโนมัติ จึงไม่ใช้ปุ่มนี้เป็นคำสั่ง START/STOP
+static void disttest_startstop_pressed(){
+    UI_TRACE_LINE("[DIST TEST] AUTO START mode - manual START ignored");
+}
+
 // Keep the lightweight P14 RPM tick bar synchronized even while another page is visible.
 static inline lv_color_t cluster_rpm_zone_color(int tick){
     if(tick < 4)  return lv_color_hex(0x29A9FF); // blue
@@ -1896,30 +1802,14 @@ static void extended_pages_update(){
     // Their widgets are persistent, so there is no need to redraw hidden pages.
     cluster_update();
 
-    // PAGE 8 sub-view: K-LINE TX / RX LOG — อัปเดตเฉพาะตอนหน้านี้แสดงอยู่
-    if(g_page == 8 && g_page8_view == 1) kline_log_page_update();
+    // PAGE 13: K-LINE TX / RX LOG — อัปเดตเฉพาะตอนหน้านี้แสดงอยู่
+    if(g_page == 13) kline_log_page_update();
 
     // PAGE 8 health data is intentionally sampled once per second. This is
     // diagnostic UI, not a real-time gauge, so faster writes only add LVGL work.
     static uint32_t last_health_ui_ms = 0;
     if(g_page == 8 && now - last_health_ui_ms >= 1000UL){
         last_health_ui_ms = now;
-
-        // WIFI button: confirmation window (3 s) expired -> disarm
-        if(g_p8_wifi_armed_ms && now - g_p8_wifi_armed_ms > 3000UL){
-            g_p8_wifi_armed_ms = 0;
-            g_p8_wifi_armed = false;
-            const char *sv = ota_wifi_ssid();
-            if(g_p8_wifi_val){ lv_label_set_text(g_p8_wifi_val, sv[0] ? sv : "SET WIFI"); lv_obj_set_style_text_color(g_p8_wifi_val, sv[0] ? WHITE : ACCENT_WARN, 0); }
-            if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "WIFI  (TAP = SETUP)");
-        }
-        // UPDATE button: confirmation window (3 s) expired -> disarm
-        if(g_p8_update_armed_ms && now - g_p8_update_armed_ms > 3000UL){
-            g_p8_update_armed_ms = 0;
-            g_p8_update_armed = false;
-            if(g_p8_update_val){ lv_label_set_text(g_p8_update_val, "UPDATE"); lv_obj_set_style_text_color(g_p8_update_val, ACCENT_OK, 0); }
-            if(g_p8_update_cap) lv_label_set_text(g_p8_update_cap, "FW v" APP_VERSION);
-        }
 
         // ECU/K-Line: distinguish a live link from a connected-but-stale link.
         const bool ecu_connected = kline_is_connected();
@@ -2171,12 +2061,11 @@ void gauge_ui_init(){
     // ══════════════════════════════════════════════════════════
     const int BAR_LBL_W=44, BAR_LBL_GAP=6;
     const int BAR_N=16, BAR_W=10, BAR_G=3, BAR_H=18;
-    const int RPM_BAR_H = 25;                                  // RPM bar สูงขึ้นจากเดิม
     const int BAR_SPAN = BAR_N*BAR_W + (BAR_N-1)*BAR_G;         // 205
     const int BAR_ROW_SPAN = BAR_LBL_W + BAR_LBL_GAP + BAR_SPAN; // 255
     const int BAR_ROW_X = (314 - BAR_ROW_SPAN) / 2;              // 29 (สมมาตรซ้าย=ขวา)
     const int BAR_X = BAR_ROW_X + BAR_LBL_W + BAR_LBL_GAP;       // จุดเริ่มบาร์ (หลังป้าย)
-    const int RPM_ROW_Y = 85, SPD_ROW_Y = 116;
+    const int RPM_ROW_Y = 89, SPD_ROW_Y = 111;   // ระยะห่างแถวบน/ล่างเท่ากัน (6px)
 
     // ── แถว RPM (บน) ──────────────────────────────────────────
     g_lbl_rpm_bar2_tag = lv_label_create(g_speed_panel);
@@ -2189,7 +2078,7 @@ void gauge_ui_init(){
     for(int i=0;i<BAR_N;i++){
         lv_obj_t *b=lv_obj_create(g_speed_panel);
         lv_obj_set_pos(b, BAR_X+i*(BAR_W+BAR_G), RPM_ROW_Y+1);
-        lv_obj_set_size(b, BAR_W, RPM_BAR_H-2);
+        lv_obj_set_size(b, BAR_W, BAR_H-2);
         lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_bg_color(b, BORDER_SUBTLE, 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
@@ -2227,10 +2116,7 @@ void gauge_ui_init(){
     // 3 กล่อง * 100px + 2 ช่องไฟ * 7px = 314px พอดี เท่ากับความกว้างแถบหัวข้อ/
     // พาเนลความเร็ว/แถบสถานะด้านบน-ล่าง ทำให้ขอบซ้าย-ขวาของแถวกล่องนี้ตรงกับ
     // องค์ประกอบอื่นทั้งหมดในหน้า (ของเดิม 101px*3+5px*2=313 เหลื่อมไป 1px)
-    // เลื่อนชุด MAX / GPS / TRIP และแถบสถานะลงเล็กน้อยเพื่อเปิดพื้นที่
-    // รอบโซนบาร์ RPM ที่เพิ่มความสูงขึ้น โดยไม่เปลี่ยนขนาดพาเนลหลัก
-    // ขยับขึ้น 6px (จาก +8 เป็น +2) — กล่อง MAX/GPS/TRIP และแถบสถานะ (GPS SEARCH / RESET TRIP) ตามไปด้วย
-    const int SBOX_Y=SPD_PANEL_Y+SPD_PANEL_H+3, SBOX_H=30, SBOX_W=100, SBOX_GAP=7;
+    const int SBOX_Y=SPD_PANEL_Y+SPD_PANEL_H+4, SBOX_H=30, SBOX_W=100, SBOX_GAP=7;
 
     auto make_speed_box = [&](int x, const char *caption, lv_color_t border_col, lv_obj_t **out_value)->lv_obj_t* {
         lv_obj_t *box = lv_obj_create(g_scr_black);
@@ -2476,7 +2362,7 @@ void gauge_ui_init(){
     lv_obj_set_size(g_graph_rpm, GW, GH);
     lv_chart_set_type(g_graph_rpm, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(g_graph_rpm, 60);
-    lv_chart_set_range(g_graph_rpm, LV_CHART_AXIS_PRIMARY_Y, 0, (lv_coord_t)RPM_GAUGE_MAX);
+    lv_chart_set_range(g_graph_rpm, LV_CHART_AXIS_PRIMARY_Y, 0, 10000);
     lv_chart_set_div_line_count(g_graph_rpm, 5, 6);
     lv_obj_set_style_bg_color(g_graph_rpm, PANEL_DARK, 0);
     lv_obj_set_style_bg_opa(g_graph_rpm, LV_OPA_COVER, 0);
@@ -2523,24 +2409,24 @@ void gauge_ui_init(){
 
     // จัด label ให้อยู่กึ่งกลางเส้นกริดและอ่านง่ายกว่าค่าชุดเดิม
     const int LX=FRAME_X+3, RX=3;
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "0",      LV_ALIGN_TOP_LEFT,  LX, gy0);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "2k",  LV_ALIGN_TOP_LEFT,  LX, gy1);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "4k",  LV_ALIGN_TOP_LEFT,  LX, gy2);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "6k",  LV_ALIGN_TOP_LEFT,  LX, gy3);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "8k",  LV_ALIGN_TOP_LEFT,  LX, gy4);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "10k", LV_ALIGN_TOP_LEFT,  LX, gy5);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "0",      LV_ALIGN_TOP_LEFT,  LX, gy0);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "2k",  LV_ALIGN_TOP_LEFT,  LX, gy1);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "4k",  LV_ALIGN_TOP_LEFT,  LX, gy2);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "6k",  LV_ALIGN_TOP_LEFT,  LX, gy3);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "8k",  LV_ALIGN_TOP_LEFT,  LX, gy4);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_BLUE, "10k", LV_ALIGN_TOP_LEFT,  LX, gy5);
 
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "0",     LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy0);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "32",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy1);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "64",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy2);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "96",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy3);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "128",   LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy4);
-    axis_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "160",   LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy5);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "0",     LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy0);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "32",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy1);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "64",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy2);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "96",    LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy3);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "128",   LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy4);
+    mk_label(g_scr_graph, &lv_font_montserrat_12, ACCENT_OK, "160",   LV_ALIGN_TOP_RIGHT, -RX+SCR2_DX, gy5);
 
     // 60 จุดที่เก็บทุก 100 ms = หน้าต่างข้อมูลประมาณ 6 วินาที
-    mk_label(g_scr_graph, &lv_font_montserrat_10, GRAY_LBL, "",
+    mk_label(g_scr_graph, &lv_font_montserrat_10, GRAY_LBL, "- ~6 s ago",
              LV_ALIGN_TOP_LEFT, GX+2, FRAME_Y+FRAME_H-13);
-    mk_label(g_scr_graph, &lv_font_montserrat_10, GRAY_LBL, "",
+    mk_label(g_scr_graph, &lv_font_montserrat_10, GRAY_LBL, "NOW -",
              LV_ALIGN_TOP_RIGHT, -19+SCR2_DX, FRAME_Y+FRAME_H-13);
 
     // ── แทนที่แถว Cursor / Gauge ด้านล่างด้วยตัวจับเวลา "เคลื่อนที่จนหยุด" ──
@@ -2638,23 +2524,43 @@ void gauge_ui_init(){
     lv_obj_set_style_shadow_opa(afr_frame, 60, 0);
     lv_obj_set_style_pad_all(afr_frame, 0, 0);
 
-    // กริดของ P05 ใช้ lv_chart ชุดเดียวกับ P04 ทุกประการ (พื้นหลัง, กรอบ, pad,
-    // สีและความหนาเส้น, จำนวนช่อง 5 แนวนอน x 6 เส้นแนวตั้ง) เพื่อให้หน้าตาเหมือนกัน
-    // เส้นข้อมูล RPM/AFR วาดทับอยู่ด้านบนเหมือนเดิม
-    lv_obj_t *afr_grid = lv_chart_create(g_scr_afr_rpm);
-    g_afr_grid = afr_grid;
-    lv_obj_set_pos(afr_grid, AFR_PLOT_X, AFR_PLOT_Y);
-    lv_obj_set_size(afr_grid, AFR_PLOT_W, AFR_PLOT_H);
-    lv_chart_set_type(afr_grid, LV_CHART_TYPE_LINE);
-    lv_chart_set_div_line_count(afr_grid, 5, 6);
-    lv_obj_set_style_bg_color(afr_grid, PANEL_DARK, 0);
-    lv_obj_set_style_bg_opa(afr_grid, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(afr_grid, GRAPH_GRID, 0);
-    lv_obj_set_style_border_width(afr_grid, 1, 0);
-    lv_obj_set_style_radius(afr_grid, 4, 0);
-    lv_obj_set_style_line_color(afr_grid, GRAPH_GRID, LV_PART_MAIN);
-    lv_obj_set_style_line_width(afr_grid, 1, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(afr_grid, 2, 0);
+    // พื้นหลัง plot area สีเข้มกว่า frame เล็กน้อย
+    lv_obj_t *plot_bg = lv_obj_create(g_scr_afr_rpm);
+    lv_obj_set_pos(plot_bg, AFR_PLOT_X, AFR_PLOT_Y);
+    lv_obj_set_size(plot_bg, AFR_PLOT_W, AFR_PLOT_H);
+    lv_obj_clear_flag(plot_bg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(plot_bg, PANEL_DARK, 0);
+    lv_obj_set_style_bg_opa(plot_bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(plot_bg, GRAPH_GRID, 0);
+    lv_obj_set_style_border_width(plot_bg, 1, 0);
+    lv_obj_set_style_radius(plot_bg, 3, 0);
+    lv_obj_set_style_pad_all(plot_bg, 0, 0);
+
+    // เส้นกริดแนวนอน 5 เส้น (0%, 25%, 50%, 75%, 100% ของ plot height)
+    for(int i=0;i<5;i++){
+        int yy = AFR_PLOT_Y + (AFR_PLOT_H-1) - (AFR_PLOT_H-1)*i/4;
+        lv_obj_t *hline = lv_obj_create(g_scr_afr_rpm);
+        lv_obj_set_pos(hline, AFR_PLOT_X, yy);
+        lv_obj_set_size(hline, AFR_PLOT_W, 1);
+        lv_obj_clear_flag(hline, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(hline, GRAPH_GRID, 0);
+        lv_obj_set_style_bg_opa(hline, (i==0||i==4)?LV_OPA_COVER:LV_OPA_50, 0);
+        lv_obj_set_style_border_width(hline, 0, 0);
+        lv_obj_set_style_pad_all(hline, 0, 0);
+    }
+
+    // เส้นกริดแนวตั้ง 7 เส้น (แบ่ง timeline เท่าๆ กัน)
+    for(int i=0;i<7;i++){
+        int xx = AFR_PLOT_X + (AFR_PLOT_W-1)*i/6;
+        lv_obj_t *vline = lv_obj_create(g_scr_afr_rpm);
+        lv_obj_set_pos(vline, xx, AFR_PLOT_Y);
+        lv_obj_set_size(vline, 1, AFR_PLOT_H);
+        lv_obj_clear_flag(vline, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(vline, GRAPH_GRID, 0);
+        lv_obj_set_style_bg_opa(vline, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(vline, 0, 0);
+        lv_obj_set_style_pad_all(vline, 0, 0);
+    }
 
     // เส้นอ้างอิง stoichiometric AFR=14.7 (สีเขียวบางๆ บน AFR axis)
     {
@@ -2672,27 +2578,27 @@ void gauge_ui_init(){
 
     // ── แกนซ้าย = RPM (สีฟ้า) ──────────────────────────────────
     const int AXIS_Y_OFF = -5;   // offset ให้ตัวเลขอยู่กึ่งกลางเส้น
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "10k",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "10k",
              LV_ALIGN_TOP_LEFT, AF_X+2, AFR_PLOT_Y + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "7.5k",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "7.5k",
              LV_ALIGN_TOP_LEFT, AF_X+2, AFR_PLOT_Y + AFR_PLOT_H/4 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "5k",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "5k",
              LV_ALIGN_TOP_LEFT, AF_X+2, AFR_PLOT_Y + AFR_PLOT_H/2 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "2.5k",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "2.5k",
              LV_ALIGN_TOP_LEFT, AF_X+2, AFR_PLOT_Y + 3*AFR_PLOT_H/4 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "0",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "0",
              LV_ALIGN_TOP_LEFT, AF_X+2, AFR_PLOT_Y + AFR_PLOT_H + AXIS_Y_OFF);
 
     // ── แกนขวา = AFR (สีเหลืองอำพัน) ───────────────────────────
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "18",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "18",
              LV_ALIGN_TOP_RIGHT, -(AF_X+2), AFR_PLOT_Y + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "16.5",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "16.5",
              LV_ALIGN_TOP_RIGHT, -(AF_X+2), AFR_PLOT_Y + AFR_PLOT_H/4 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "15",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "15",
              LV_ALIGN_TOP_RIGHT, -(AF_X+2), AFR_PLOT_Y + AFR_PLOT_H/2 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "13.5",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "13.5",
              LV_ALIGN_TOP_RIGHT, -(AF_X+2), AFR_PLOT_Y + 3*AFR_PLOT_H/4 + AXIS_Y_OFF);
-    axis_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "12",
+    mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "12",
              LV_ALIGN_TOP_RIGHT, -(AF_X+2), AFR_PLOT_Y + AFR_PLOT_H + AXIS_Y_OFF);
 
     // ── Legend แสดงสีเส้นกราฟ (มุมล่างขวา frame) ────────────────
@@ -2708,7 +2614,7 @@ void gauge_ui_init(){
         lv_obj_set_style_bg_opa(dot_rpm, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(dot_rpm, 4, 0);
         lv_obj_set_style_border_width(dot_rpm, 0, 0);
-        mk_label(g_scr_afr_rpm, &A4SPEED_14, ACCENT_BLUE, "RPM",
+        mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_BLUE, "RPM",
                  LV_ALIGN_TOP_LEFT, AF_X + 18, LEG_Y);
         // dot AFR
         lv_obj_t *dot_afr = lv_obj_create(g_scr_afr_rpm);
@@ -2719,7 +2625,7 @@ void gauge_ui_init(){
         lv_obj_set_style_bg_opa(dot_afr, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(dot_afr, 4, 0);
         lv_obj_set_style_border_width(dot_afr, 0, 0);
-        mk_label(g_scr_afr_rpm, &A4SPEED_14, ACCENT_WARN, "AFR (EST.)",
+        mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_WARN, "AFR (EST.)",
                  LV_ALIGN_TOP_LEFT, AF_X + 68, LEG_Y);
         // เส้น stoich ──
         lv_obj_t *dot_stoich = lv_obj_create(g_scr_afr_rpm);
@@ -2729,7 +2635,7 @@ void gauge_ui_init(){
         lv_obj_set_style_bg_color(dot_stoich, ACCENT_OK, 0);
         lv_obj_set_style_bg_opa(dot_stoich, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(dot_stoich, 0, 0);
-        mk_label(g_scr_afr_rpm, &A4SPEED_14, ACCENT_OK, "Stoich 14.7",
+        mk_label(g_scr_afr_rpm, &lv_font_montserrat_14, ACCENT_OK, "Stoich 14.7",
                  LV_ALIGN_TOP_LEFT, AF_X + 162, LEG_Y);
     }
 
@@ -2738,14 +2644,14 @@ void gauge_ui_init(){
     lv_obj_set_pos(g_afr_rpm_line, AFR_PLOT_X, AFR_PLOT_Y);
     lv_obj_set_size(g_afr_rpm_line, AFR_PLOT_W, AFR_PLOT_H);
     lv_obj_set_style_line_color(g_afr_rpm_line, ACCENT_BLUE, LV_PART_MAIN);
-    lv_obj_set_style_line_width(g_afr_rpm_line, 2, LV_PART_MAIN);   // ความหนาเท่าหน้า P04 (2px)
+    lv_obj_set_style_line_width(g_afr_rpm_line, 3, LV_PART_MAIN);
     lv_obj_set_style_line_rounded(g_afr_rpm_line, true, LV_PART_MAIN);
 
     g_afr_rpm_afr_line = lv_line_create(g_scr_afr_rpm);
     lv_obj_set_pos(g_afr_rpm_afr_line, AFR_PLOT_X, AFR_PLOT_Y);
     lv_obj_set_size(g_afr_rpm_afr_line, AFR_PLOT_W, AFR_PLOT_H);
     lv_obj_set_style_line_color(g_afr_rpm_afr_line, ACCENT_WARN, LV_PART_MAIN);
-    lv_obj_set_style_line_width(g_afr_rpm_afr_line, 2, LV_PART_MAIN); // ความหนาเท่าหน้า P04 (2px)
+    lv_obj_set_style_line_width(g_afr_rpm_afr_line, 3, LV_PART_MAIN);
     lv_obj_set_style_line_rounded(g_afr_rpm_afr_line, true, LV_PART_MAIN);
 
     g_afr_rpm_count = 1;
@@ -2767,13 +2673,13 @@ void gauge_ui_init(){
 
     // Compact, balanced layout for 320x240: keep every element inside its own zone.
     g_lbl_dtc_title = mk_label(g_scr_dtc, &A4SPEED_16, ACCENT_ERR,
-                                "DTC / ERROR CODE", LV_ALIGN_TOP_MID, 0, 8);
+                                "DTC / ERROR CODE", LV_ALIGN_TOP_MID, 0, 7);
     g_lbl_dtc_conn = mk_label(g_scr_dtc, &A4SPEED_14, GRAY_LBL,
-                              "ECU STATUS", LV_ALIGN_TOP_MID, 0, 28);
+                              "ECU STATUS", LV_ALIGN_TOP_MID, 0, 29);
 
     lv_obj_t *dtc_card = lv_obj_create(g_scr_dtc);
-    lv_obj_set_pos(dtc_card, DTC_MARGIN_X, DTC_CARD_Y);
-    lv_obj_set_size(dtc_card, DTC_BLOCK_W, DTC_CARD_H);
+    lv_obj_set_pos(dtc_card, 18, 50);
+    lv_obj_set_size(dtc_card, 284, 72);
     lv_obj_clear_flag(dtc_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(dtc_card, PANEL_CARD, 0);
     lv_obj_set_style_border_color(dtc_card, BORDER_SUBTLE, 0);
@@ -2790,7 +2696,7 @@ void gauge_ui_init(){
     lv_label_set_text(g_lbl_dtc_code, "NO ERROR");
     lv_obj_set_width(g_lbl_dtc_code, 268);
     lv_obj_set_height(g_lbl_dtc_code, 20);
-    lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, DTC_CODE_Y_NORMAL);
+    lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, 12);
 
     g_lbl_dtc_desc = lv_label_create(dtc_card);
     lv_obj_set_style_text_font(g_lbl_dtc_desc, &A4SPEED_14, 0);
@@ -2799,12 +2705,12 @@ void gauge_ui_init(){
     lv_label_set_text(g_lbl_dtc_desc, "SYSTEM OK - NO ACTIVE DTC");
     lv_obj_set_width(g_lbl_dtc_desc, 268);
     lv_obj_set_height(g_lbl_dtc_desc, 16);
-    lv_obj_align(g_lbl_dtc_desc, LV_ALIGN_TOP_MID, 0, DTC_DESC_Y);
+    lv_obj_align(g_lbl_dtc_desc, LV_ALIGN_BOTTOM_MID, 0, -5);
 
     lv_obj_t *clear_dtc_btn = lv_obj_create(g_scr_dtc);
     g_btn_clear_dtc = clear_dtc_btn;
-    lv_obj_set_pos(clear_dtc_btn, DTC_MARGIN_X, DTC_CLEAR_Y);
-    lv_obj_set_size(clear_dtc_btn, DTC_BLOCK_W, DTC_CLEAR_H);
+    lv_obj_set_pos(clear_dtc_btn, 50, 130);
+    lv_obj_set_size(clear_dtc_btn, 220, 40);
     lv_obj_clear_flag(clear_dtc_btn, LV_OBJ_FLAG_SCROLLABLE);
     // Make this a genuine LVGL clickable object, not just a visual panel.
     lv_obj_add_flag(clear_dtc_btn, LV_OBJ_FLAG_CLICKABLE);
@@ -2821,9 +2727,9 @@ void gauge_ui_init(){
 
     // Status is centered directly below the CLEAR DTC button.
     g_lbl_dtc_result = mk_label(g_scr_dtc, &A4SPEED_16, GRAY_LBL,
-                                "READY", LV_ALIGN_TOP_MID, 0, DTC_RESULT_Y);
-    lv_obj_set_width(g_lbl_dtc_result, DTC_BLOCK_W);
-    lv_obj_set_height(g_lbl_dtc_result, 12);
+                                "READY", LV_ALIGN_TOP_MID, 0, 174);
+    lv_obj_set_width(g_lbl_dtc_result, 300);
+    lv_obj_set_height(g_lbl_dtc_result, 20);
     lv_obj_set_style_text_align(g_lbl_dtc_result, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(g_lbl_dtc_result, LV_LABEL_LONG_CLIP);
 
@@ -2832,8 +2738,8 @@ void gauge_ui_init(){
     g_btn_dtc_back = next_page_btn;
     // Keep the status/result text fully above the BACK TO MENU button so
     // connection/clear-result messages never render underneath the button.
-    lv_obj_set_pos(next_page_btn, DTC_MARGIN_X, DTC_BACK_Y);
-    lv_obj_set_size(next_page_btn, DTC_BLOCK_W, DTC_BACK_H);
+    lv_obj_set_pos(next_page_btn, 50, 210);
+    lv_obj_set_size(next_page_btn, 220, 26);
     lv_obj_clear_flag(next_page_btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(next_page_btn, lv_color_hex(0x151515), 0);
     lv_obj_set_style_bg_opa(next_page_btn, LV_OPA_COVER, 0);
@@ -2846,6 +2752,8 @@ void gauge_ui_init(){
     lv_obj_set_style_text_color(next_page_lbl, ACCENT_WARN, 0);
     lv_obj_set_style_text_align(next_page_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(next_page_lbl, "BACK TO MENU");
+    lv_obj_set_width(next_page_lbl, 200);
+    lv_obj_set_height(next_page_lbl, 24);
     lv_obj_center(next_page_lbl);
 
     // ── Confirmation dialog for CLEAR DTC belongs to page 5. ──
@@ -2858,7 +2766,6 @@ void gauge_ui_init(){
     lv_obj_set_style_border_color(g_dtc_page4_confirm_overlay,ACCENT_ERR,0);
     lv_obj_set_style_border_width(g_dtc_page4_confirm_overlay,2,0);
     lv_obj_set_style_radius(g_dtc_page4_confirm_overlay,10,0);
-    lv_obj_set_style_pad_all(g_dtc_page4_confirm_overlay,0,0);
     lv_obj_set_style_shadow_width(g_dtc_page4_confirm_overlay,24,0);
     lv_obj_set_style_shadow_opa(g_dtc_page4_confirm_overlay,120,0);
     lv_obj_add_flag(g_dtc_page4_confirm_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -2870,7 +2777,7 @@ void gauge_ui_init(){
     lv_label_set_text(page4_confirm_txt,"CONFIRM CLEAR DTC");
     lv_obj_set_width(page4_confirm_txt,250);
     lv_obj_set_style_text_align(page4_confirm_txt,LV_TEXT_ALIGN_CENTER,0);
-    lv_obj_align(page4_confirm_txt,LV_ALIGN_TOP_MID,0,17);
+    lv_obj_align(page4_confirm_txt,LV_ALIGN_TOP_MID,0,10);
 
     lv_obj_t *page4_confirm_msg=lv_label_create(g_dtc_page4_confirm_overlay);
     lv_obj_set_style_text_font(page4_confirm_msg,&lv_font_montserrat_12,0);
@@ -2878,7 +2785,7 @@ void gauge_ui_init(){
     lv_label_set_text(page4_confirm_msg,"Clear all stored fault codes?");
     lv_obj_set_width(page4_confirm_msg,250);
     lv_obj_set_style_text_align(page4_confirm_msg,LV_TEXT_ALIGN_CENTER,0);
-    lv_obj_align(page4_confirm_msg,LV_ALIGN_TOP_MID,0,52);
+    lv_obj_align(page4_confirm_msg,LV_ALIGN_TOP_MID,0,38);
 
     // Two confirmation buttons: same Y, same size, symmetric margins, and a fixed 10px gap.
     // This keeps the visual buttons perfectly level and also makes their touch targets
@@ -2897,10 +2804,8 @@ void gauge_ui_init(){
     // Use explicit pixel positions instead of TOP_LEFT/TOP_RIGHT alignment.
     // LVGL parent padding reduces the content width, which can make the two
     // 120px buttons overlap when aligned to opposite edges.
-    // พื้นที่ใช้งาน 276x144 (pad 0, border 2): ขอบซ้าย/ขวา 12 + ช่องไฟ 12 + ปุ่ม 120 x2
-    // แนวตั้ง: ช่องว่างบน/ระหว่างบรรทัด/ล่าง ~17 px เท่ากัน
-    lv_obj_set_pos(page4_cancel_btn, 12, 85);
-    lv_obj_set_pos(page4_yes_btn, 144, 85);
+    lv_obj_set_pos(page4_cancel_btn, 5, 80);
+    lv_obj_set_pos(page4_yes_btn, 130, 80);
     lv_obj_set_style_border_width(page4_cancel_btn,2,0);
     lv_obj_set_style_border_width(page4_yes_btn,2,0);
     lv_obj_set_style_border_color(page4_cancel_btn,lv_color_hex(0x6b7280),0);
@@ -2910,8 +2815,8 @@ void gauge_ui_init(){
     // ── Verification result overlay: remains on page 4 and reports the
     // actual DTC memory before clear, clear result, and post-clear rescan.
     g_dtc_page4_verify_overlay = lv_obj_create(g_scr_dtc);
-    lv_obj_set_pos(g_dtc_page4_verify_overlay,6,6);
-    lv_obj_set_size(g_dtc_page4_verify_overlay,308,228);
+    lv_obj_set_pos(g_dtc_page4_verify_overlay,10,34);
+    lv_obj_set_size(g_dtc_page4_verify_overlay,300,172);
     lv_obj_clear_flag(g_dtc_page4_verify_overlay,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(g_dtc_page4_verify_overlay,PANEL_CARD,0);
     lv_obj_set_style_border_color(g_dtc_page4_verify_overlay,ACCENT_BLUE,0);
@@ -2925,15 +2830,12 @@ void gauge_ui_init(){
     lv_obj_set_style_text_font(g_dtc_page4_verify_label,&lv_font_montserrat_12,0);
     lv_obj_set_style_text_color(g_dtc_page4_verify_label,WHITE,0);
     lv_obj_set_style_text_align(g_dtc_page4_verify_label,LV_TEXT_ALIGN_CENTER,0);
-    // พื้นที่ใช้งาน 292x212: ข้อความสูงสุด 166 px (DOT = ตัดท้ายด้วย ... ถ้ายาวเกิน
-    // แทนที่จะล้นไปทับปุ่ม OK), ปุ่ม OK ชิดล่าง กึ่งกลางแนวนอน
-    lv_label_set_long_mode(g_dtc_page4_verify_label,LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_line_space(g_dtc_page4_verify_label,2,0);
-    lv_obj_set_width(g_dtc_page4_verify_label,292);
-    lv_obj_set_height(g_dtc_page4_verify_label,166);
-    lv_obj_align(g_dtc_page4_verify_label,LV_ALIGN_TOP_MID,0,0);
+    lv_label_set_long_mode(g_dtc_page4_verify_label,LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(g_dtc_page4_verify_label,286);
+    lv_obj_set_height(g_dtc_page4_verify_label,108);
+    lv_obj_align(g_dtc_page4_verify_label,LV_ALIGN_TOP_MID,0,8);
 
-    mk_menu_btn(g_dtc_page4_verify_overlay,96,174,100,38,"OK",BTN_NEUTRAL,page4_verify_ok_cb);
+    mk_menu_btn(g_dtc_page4_verify_overlay,100,122,100,38,"OK",BTN_NEUTRAL,page4_verify_ok_cb);
 
     // ══════════════════════════════════════════════════════════
     //  หน้า 1: SETTINGS — DAY/NIGHT + BRIGHTNESS
@@ -3128,7 +3030,7 @@ void gauge_ui_init(){
     //  โดยยังคงตัวเลข RPM ขนาดใหญ่ + RPM segment bar ด้านล่าง
     // ══════════════════════════════════════════════════════════
     const int RPM_Y=28;
-    const int RPM_CARD_H=58;
+    const int RPM_CARD_H=48;
 
     lv_obj_t *rpm_card=lv_obj_create(scr);
     lv_obj_set_pos(rpm_card,MX,RPM_Y);
@@ -3159,7 +3061,7 @@ void gauge_ui_init(){
     // ── แถบไฟ RPM สไตล์ A4SPEED racing (24 segments) ───────────
     // ย้ายแถบเข้าไปอยู่ "ภายใน" RPM card เพื่อกันล้นจอ/หลุดตำแหน่ง
     // และคุมระยะซ้าย-ขวาให้สมดุลแบบคงที่บนจอ 320x240
-    const int TACHO_BAR_H=15;
+    const int TACHO_BAR_H=8;
     const int TG=2;                    // ช่องว่างระหว่าง segment
     const int TW=10;                   // ความกว้างแต่ละ segment
     const int TICKS_TOTAL_W = NUM_TICKS*TW + (NUM_TICKS-1)*TG;
@@ -3266,8 +3168,7 @@ void gauge_ui_init(){
             lv_label_set_text(g_lbl_dist_target,t);
         }
     }
-    // true = ถ้า mount ไม่ได้ (ชิปใหม่/พาร์ทิชันว่าง) ให้ format ครั้งเดียวแล้ว mount ใหม่
-    g_logger_fs_ready = LittleFS.begin(true);
+    g_logger_fs_ready = LittleFS.begin(false);
     logger_load_session_counter();
     logger_reset_session_stats();
 
@@ -3295,9 +3196,9 @@ void gauge_ui_init(){
     lv_obj_set_style_border_width(g_scr_menu, 0, 0);
     lv_obj_set_style_pad_all(g_scr_menu, 0, 0);
 
-    // ── SELECT PAGE: compact 4x4 launcher ───────────────────────
-    // ทำให้หัวข้อเด่นขึ้นและเพิ่ม breathing room ระหว่างการ์ด โดยไม่เพิ่ม
-    // จำนวน widget ต่อ tile เพื่อไม่ดันการใช้ RAM ของ ESP32 ขึ้นโดยไม่จำเป็น
+    // ── SELECT PAGE: balanced 3x4 launcher ──────────────────────
+    // หน้า 9/11/12/13 ถูกย้ายไปอยู่ในชุดย่อยของ PAGE 8 แล้ว
+    // จึงใช้ 12 tile ที่จัดกึ่งกลางพอดีกับจอ 320x240
     g_menu_header = lv_obj_create(g_scr_menu);
     lv_obj_set_pos(g_menu_header, 4, 2);
     lv_obj_set_size(g_menu_header, 312, 21);
@@ -3314,19 +3215,12 @@ void gauge_ui_init(){
     g_menu_header_hint = mk_label(g_menu_header, &lv_font_montserrat_10, WHITE, "TOUCH TO OPEN", LV_ALIGN_RIGHT_MID, -8, 0);
 
     {
-        const int MCOLS = 4;
-        const int MGAP  = 4, MX0 = 4, MY0 = 27;
-        const int MCW   = 75, MRH = 66; // MRH: 3 แถว + ช่องว่าง ให้เต็มความสูงจอ 240px (ล่างสุด ~233px)
-        // หน้าที่แสดงในเมนู: ลบ P09 (WATCH), P11 (DATA), P12 (ALARMS + PERFORMANCE) ออกแล้ว
-        // g_menu_tiles[] ยังคงใช้ index = หมายเลขหน้า - 1 เดิม เพื่อให้การแตะ/ธีมทำงานเหมือนเดิม
-        static const uint8_t MENU_VISIBLE[] = {1, 2, 3, 4, 5, 6, 7, 8, 10, 14, 15, 16};
-        const int MN = (int)(sizeof(MENU_VISIBLE) / sizeof(MENU_VISIBLE[0]));
-        for(int k = 0; k < MN; k++){
-            const int i = MENU_VISIBLE[k] - 1;
-            const int r = k / MCOLS, c = k % MCOLS;
-            // แถวสุดท้ายที่มีไม่ครบ 4 ช่อง จัดให้อยู่กึ่งกลาง
-            const int row_n = (MN - r * MCOLS < MCOLS) ? (MN - r * MCOLS) : MCOLS;
-            const int x = MX0 + c * (MCW + MGAP) + (MCOLS - row_n) * (MCW + MGAP) / 2;
+        const int MCOLS = 3;
+        const int MGAP  = 5, MX0 = 4, MY0 = 27;
+        const int MCW   = 101, MRH = 47;
+        for(int i = 0; i < 12; i++){
+            const int r = i / MCOLS, c = i % MCOLS;
+            const int x = MX0 + c * (MCW + MGAP);
             const int y = MY0 + r * (MRH + MGAP);
             const bool locked = false; // PAGE 14 is now the second live instrument cluster
 
@@ -3346,7 +3240,7 @@ void gauge_ui_init(){
             lv_obj_set_style_text_font(num, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(num, locked ? WHITE : GRAY_LBL, 0);
             lv_obj_set_style_text_align(num, LV_TEXT_ALIGN_CENTER, 0);
-            char numtxt[5]; snprintf(numtxt, sizeof(numtxt), "P%02d", i + 1);
+            char numtxt[5]; snprintf(numtxt, sizeof(numtxt), "P%02d", MENU_PAGE_TARGET[i]);
             lv_label_set_text(num, numtxt);
             lv_obj_set_width(num, MCW - 8);
             lv_obj_align(num, LV_ALIGN_TOP_MID, 0, 3);
@@ -3473,8 +3367,7 @@ bool gauge_ui_is_day_mode(){
 
 void gauge_ui_update(){
     static uint32_t last=0;
-    if(millis()-last<50) return;
-    last=millis();
+    if(millis()-last<50) return; last=millis();
     read_kline_data();
 
     // Cheap check every tick; only does real work once the background clear
@@ -3521,7 +3414,7 @@ void gauge_ui_update(){
     // ── RPM segment bar: ไล่สีเขียว -> เหลือง -> แดง กะพริบตอน redline ──
     // ใช้ค่าที่กรองแล้ว (f_rpm) + partial opacity ที่ช่องขอบเขต ให้บาร์
     // ไหลลื่นแทนการกระโดดทีละช่องแบบ digital step ──────────────────
-    float active_f = f_rpm/RPM_GAUGE_MAX*NUM_TICKS;
+    float active_f = f_rpm/10000.0f*NUM_TICKS;
     int   active   = (int)active_f;
     float frac     = active_f - active;   // เศษ 0.0-1.0 ของช่องขอบเขต
     bool redline = active >= (int)(NUM_TICKS*0.90f);
@@ -3537,7 +3430,7 @@ void gauge_ui_update(){
             col = (i<(int)(NUM_TICKS*0.60f))?ACCENT_OK
                 : (i<(int)(NUM_TICKS*0.85f))?ACCENT_WARN
                 : ACCENT_ERR;
-            opa = (lv_opa_t)((int)LV_OPA_30 + (int)(frac*(float)((int)LV_OPA_COVER-(int)LV_OPA_30)));
+            opa = LV_OPA_30 + (lv_opa_t)(frac*(LV_OPA_COVER-LV_OPA_30));
         }
         else if(i<(int)(NUM_TICKS*0.60f))  col=ACCENT_OK;
         else if(i<(int)(NUM_TICKS*0.85f))  col=ACCENT_WARN;
@@ -3769,7 +3662,7 @@ void gauge_ui_update(){
     // g_rpm_bar2 อยู่บน g_scr_black (P03) ไม่ใช่ P02. อัปเดตทุก UI tick
     // เพื่อให้หน้า P03 เปิดขึ้นมาแล้วบาร์ใช้ RPM ล่าสุดทันที.
     {
-        const float rpm_pos = constrain(f_rpm / RPM_GAUGE_MAX * 16.0f, 0.0f, 16.0f);
+        const float rpm_pos = constrain(f_rpm / 10000.0f * 16.0f, 0.0f, 16.0f);
         const int RPM_BAR_OK = 9;
         const int RPM_BAR_WARN = 13;
         for(int i=0; i<16; ++i){
@@ -3781,9 +3674,9 @@ void gauge_ui_update(){
 
             set_bg_color_if_changed(g_rpm_bar2[i], c);
             set_bg_opa_if_changed(g_rpm_bar2[i],
-                (fill <= 0.0f) ? (lv_opa_t)LV_OPA_20 :
-                (fill >= 1.0f) ? (lv_opa_t)LV_OPA_COVER :
-                (lv_opa_t)((int)LV_OPA_30 + (int)(fill * (float)((int)LV_OPA_COVER - (int)LV_OPA_30))));
+                (fill <= 0.0f) ? LV_OPA_20 :
+                (fill >= 1.0f) ? LV_OPA_COVER :
+                (lv_opa_t)(LV_OPA_30 + fill * (LV_OPA_COVER - LV_OPA_30)));
         }
     }
 
@@ -3798,9 +3691,9 @@ void gauge_ui_update(){
                            (i < SPD_BAR_WARN) ? ACCENT_WARN : ACCENT_ERR;
             set_bg_color_if_changed(g_spd_bar2[i], c);
             set_bg_opa_if_changed(g_spd_bar2[i],
-                (fill <= 0.0f) ? (lv_opa_t)LV_OPA_20 :
-                (fill >= 1.0f) ? (lv_opa_t)LV_OPA_COVER :
-                (lv_opa_t)((int)LV_OPA_30 + (int)(fill * (float)((int)LV_OPA_COVER - (int)LV_OPA_30))));
+                (fill <= 0.0f) ? LV_OPA_20 :
+                (fill >= 1.0f) ? LV_OPA_COVER :
+                (lv_opa_t)(LV_OPA_30 + fill * (LV_OPA_COVER - LV_OPA_30)));
         }
     }
 
@@ -3810,7 +3703,7 @@ void gauge_ui_update(){
     if(g_page == 4 && millis() - graph_t >= 100){
         graph_t = millis();
         if(g_series_rpm && g_graph_rpm){
-            lv_chart_set_next_value(g_graph_rpm, g_series_rpm, (lv_coord_t)constrain((int)f_rpm, 0, (int)RPM_GAUGE_MAX));
+            lv_chart_set_next_value(g_graph_rpm, g_series_rpm, (lv_coord_t)constrain((int)f_rpm, 0, 10000));
             lv_chart_refresh(g_graph_rpm);
         }
         if(g_series_speed && g_graph_speed){
@@ -3880,7 +3773,7 @@ void gauge_ui_update(){
 
     // ── แถวสถิติ BATT / INJ / ECT / INC (หน่วยต่อท้ายในตัวเลขเดียวกัน) ──
     snprintf(buf,sizeof(buf),"%.1fV",f_batt);    LABEL_SET_IF_CHANGED(g_lbl_batt,buf);
-    lv_obj_set_style_text_color(g_lbl_batt,(f_batt<=ALARM_BATT_LOW_V)?ACCENT_ERR:theme_primary_text(),0);
+    lv_obj_set_style_text_color(g_lbl_batt,(f_batt<12.0f)?ACCENT_ERR:theme_primary_text(),0);
 
     snprintf(buf,sizeof(buf),"%.1f",f_inj);      LABEL_SET_IF_CHANGED(g_lbl_inj,buf);
 
@@ -3888,7 +3781,7 @@ void gauge_ui_update(){
     // (แก้ไข) ค่าปกติเดิม hardcode เป็น WHITE ทำให้ตัวเลข ECT มองไม่เห็นในโหมด
     // กลางวัน (พื้นกล่องเป็นสีขาว/สว่าง) จึงเปลี่ยนมาใช้ theme_primary_text()
     // ให้สลับสีตาม DAY/NIGHT เหมือนช่อง BATT ข้างๆ
-    lv_color_t ect_col=(f_ect>=ALARM_ECT_HIGH_C)?ACCENT_ERR:(f_ect<ECT_COLD_C)?ACCENT_TEMP:theme_primary_text();
+    lv_color_t ect_col=(f_ect>110)?ACCENT_ERR:(f_ect<50)?ACCENT_TEMP:theme_primary_text();
     lv_obj_set_style_text_color(g_lbl_ect,ect_col,0);
 
     snprintf(buf,sizeof(buf),"%.0f",f_ign);      LABEL_SET_IF_CHANGED(g_lbl_inc,buf);
@@ -3938,6 +3831,8 @@ void gauge_ui_update(){
     // a conservative, monotonic calibration curve instead of a false inverse
     // equation. Only the neighbourhood of stoich should be treated as close
     // to a real AFR measurement.
+    constexpr float O2_STOICH_V = 0.45f;
+    constexpr float AFR_STOICH  = 14.7f;
 
     // Conservative narrowband estimate curve. These anchors are intentionally
     // compressed at the rich/lean ends because the sensor has little resolving
@@ -3999,8 +3894,7 @@ void gauge_ui_update(){
     float lambda = f_afr/14.7f;
     float dl = lambda - 1.0f;
     float co2_est = CO2_PEAK * expf(-8.0f*dl*dl);
-    if(co2_est<0.0f) co2_est=0.0f;
-    if(co2_est>CO2_PEAK) co2_est=CO2_PEAK;
+    if(co2_est<0.0f) co2_est=0.0f; if(co2_est>CO2_PEAK) co2_est=CO2_PEAK;
     f_co2 = ema(f_co2, co2_est, 0.3f);
 
     if(g_afr_valid) snprintf(buf,sizeof(buf),"%.1f | CO2 %.0f%%",f_afr,f_co2);
@@ -4031,7 +3925,7 @@ void gauge_ui_update(){
             // ใช้ขนาดเดียวกับที่คำนวณใน init (AF_W=314, AF_H=151, margin 34/19)
             const int PLOT_W = 314 - 68;   // 246
             const int PLOT_H = 151 - 19;   // 132
-            const float RPM_MAX = RPM_GAUGE_MAX;
+            const float RPM_MAX = 10000.0f;
             const float AFR_MIN = 12.0f;
             const float AFR_MAX = 18.0f;
             const int MAX_POINTS = 48;
@@ -4124,15 +4018,12 @@ void gauge_ui_update(){
             lv_obj_set_width(g_lbl_dtc_code, 268);
             lv_obj_set_height(g_lbl_dtc_code, 38);
             lv_obj_set_style_text_color(g_lbl_dtc_code, ACCENT_ERR, 0);
-            lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, DTC_CODE_Y_MULTI);
+            lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, 3);
             LABEL_SET_IF_CHANGED(g_lbl_dtc_desc, "MULTIPLE DTC CODES DETECTED");
         } else if(!connected_now){
             LABEL_SET_IF_CHANGED(g_lbl_dtc_code, "---");
             lv_obj_set_style_text_font(g_lbl_dtc_code, &A4SPEED_16, 0);
             lv_obj_set_style_text_color(g_lbl_dtc_code, ACCENT_WARN, 0);
-            lv_obj_set_width(g_lbl_dtc_code, 268);
-            lv_obj_set_height(g_lbl_dtc_code, 20);
-            lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, DTC_CODE_Y_NORMAL);
             LABEL_SET_IF_CHANGED(g_lbl_dtc_desc, "NO ECU CONNECTION");
         } else {
             LABEL_SET_IF_CHANGED(g_lbl_dtc_code, "NO ERROR");
@@ -4141,7 +4032,7 @@ void gauge_ui_update(){
             lv_obj_set_style_text_align(g_lbl_dtc_code, LV_TEXT_ALIGN_CENTER, 0);
             lv_obj_set_width(g_lbl_dtc_code, 268);
             lv_obj_set_height(g_lbl_dtc_code, 20);
-            lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, DTC_CODE_Y_NORMAL);
+            lv_obj_align(g_lbl_dtc_code, LV_ALIGN_TOP_MID, 0, 12);
             LABEL_SET_IF_CHANGED(g_lbl_dtc_desc, "SYSTEM OK - NO ACTIVE DTC");
         }
     }
@@ -4229,17 +4120,6 @@ static void page4_open_confirm(){
     // เปิด CONFIRM ได้เฉพาะตอนที่อยู่หน้า 6 จริง ๆ เท่านั้น
     if(g_page != 6) return;
     if(g_dtc_page4_verify_open) return;
-    // กำลังลบอยู่แล้ว: ห้ามเปิด CONFIRM ซ้ำ (กันสั่งลบซ้อนระหว่างรอผล)
-    if(g_clear_dtc_awaiting_result) return;
-    // ECU ไม่ได้เชื่อมต่อ: คำสั่งลบจะค้างรอใน K-Line task จนกว่าจะต่อใหม่
-    // ทำให้หน้าจอค้างที่ "CLEARING..." จึงไม่เปิด CONFIRM และแจ้งผู้ใช้ทันที
-    if(!kline_is_connected()){
-        if(g_lbl_dtc_result){
-            lv_label_set_text(g_lbl_dtc_result, "ECU NOT CONNECTED");
-            lv_obj_set_style_text_color(g_lbl_dtc_result, ACCENT_WARN, 0);
-        }
-        return;
-    }
     g_dtc_page4_confirm_open = true;
     lv_obj_clear_flag(g_dtc_page4_confirm_overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(g_dtc_page4_confirm_overlay);
@@ -4282,6 +4162,7 @@ static void page4_confirm_yes_cb(lv_event_t *e){
 // does the actual read->clear->reconnect->rescan sequence and this UI thread
 // never blocks waiting for it - see finalize_clear_dtc_if_ready(), polled
 // from gauge_ui_update(), for where the result gets shown once ready.
+static bool g_clear_dtc_awaiting_result = false;
 
 void gauge_ui_trigger_clear_dtc(){
     UI_TRACE_LINE("[UI] CLEAR DTC triggered -> requesting async READ BEFORE / CLEAR / RESCAN");
@@ -4349,15 +4230,15 @@ static void finalize_clear_dtc_if_ready(){
         char report[420];
         if(r == KLINE_CLEAR_OK && verified){
             snprintf(report, sizeof(report),
-                     "BEFORE CLEAR\n%s\nCLEAR: SUCCESS\nAFTER RESCAN\n%s\nDTC CLEAR VERIFIED",
+                     "BEFORE CLEAR\n%s\n\nCLEAR: SUCCESS\n\nAFTER RESCAN\n%s\n\nDTC CLEAR VERIFIED",
                      before, after);
         } else if(r == KLINE_CLEAR_OK){
             snprintf(report, sizeof(report),
-                     "BEFORE CLEAR\n%s\nCLEAR: SUCCESS\nAFTER RESCAN\n%s\nVERIFY FAILED - DTC MAY STILL EXIST",
+                     "BEFORE CLEAR\n%s\n\nCLEAR: SUCCESS\n\nAFTER RESCAN\n%s\n\nVERIFY FAILED - DTC MAY STILL EXIST",
                      before, after);
         } else {
             snprintf(report, sizeof(report),
-                     "BEFORE CLEAR\n%s\nCLEAR: %s\nAFTER RESCAN\n%s",
+                     "BEFORE CLEAR\n%s\n\nCLEAR: %s\n\nAFTER RESCAN\n%s",
                      before, resultText, after);
         }
         lv_label_set_text(g_dtc_page4_verify_label, report);
@@ -4391,11 +4272,7 @@ static void settings_set_brightness(int delta){
     if(v < 32) v = 32;
     if(v > 255) v = 255;
     g_brightness = (uint8_t)v;
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-    ledcWrite(BACKLIGHT_PIN, g_brightness);
-#else
     ledcWrite(BACKLIGHT_CHANNEL, g_brightness);
-#endif
     settings_apply_theme();
     UI_TRACE("[UI] BRIGHTNESS -> %u / 255\n", (unsigned)g_brightness);
     lv_refr_now(NULL);
@@ -4456,15 +4333,15 @@ void gauge_ui_handle_touch_release_raw(int32_t raw_x, int32_t raw_y, int32_t map
 }
 
 void gauge_ui_handle_touch_release(int32_t x, int32_t y){
-    // หน้า 0: MENU — แตะแผ่นไหนก็ไปหน้านั้น ใช้ hit-test จากกรอบจริงของปุ่ม (รวมเมนู 1..16)
-    // (เหมือนวิธีเช็คปุ่ม RESET TRIP ของหน้า 3) แทนการพึ่ง LVGL click event
+    // หน้า 0: MENU — แตะแผ่นไหนก็ไปหน้านั้น ใช้ hit-test จากกรอบจริงของปุ่ม
+    // เมนูหลักมี 12 แผ่น; PAGE 8 เป็นจุดเข้า sequence 8 -> 9 -> 11 -> 12 -> 13 -> MENU
     if(g_page == 0){
-        for(int i = 0; i < 16; i++){
+        for(int i = 0; i < 12; i++){
             if(!g_menu_tiles[i]) continue;
             lv_area_t a;
             lv_obj_get_coords(g_menu_tiles[i], &a);
             if(x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2){
-                const uint8_t target = (uint8_t)(i + 1);
+                const uint8_t target = MENU_PAGE_TARGET[i];
                 UI_TRACE("[UI] MENU TILE %d TOUCH -> PAGE%u\n", i, (unsigned)target);
                 g_page = target;
                 g_show_black = (g_page == 3);
@@ -4481,8 +4358,12 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
                         if(g_scr_dtc)               lv_scr_load(g_scr_dtc);
                         break;
                     case 7:  if(g_scr_log)          lv_scr_load(g_scr_log);          break;
-                    case 8:  g_page8_view = 0; if(g_scr_health) lv_scr_load(g_scr_health); break;
+                    case 8:  if(g_scr_health)       lv_scr_load(g_scr_health);       break;
+                    case 9:  if(g_scr_watchdog)     lv_scr_load(g_scr_watchdog);     break;
                     case 10: if(g_scr_sensors)      lv_scr_load(g_scr_sensors);      break;
+                    case 11: if(g_scr_data_logger)  lv_scr_load(g_scr_data_logger);  break;
+                    case 12: if(g_scr_alarm){ g_page12_view = 0; lv_scr_load(g_scr_alarm); } break;
+                    case 13: if(g_scr_fuel_table)   lv_scr_load(g_scr_fuel_table);   break;
                     case 14: if(g_scr_fueltrim)     lv_scr_load(g_scr_fueltrim);     break;
                     case 15: { void *ntp = nullptr; sqxzgauge_page_get_screen(&ntp); if(ntp) lv_scr_load((lv_obj_t*)ntp); } break;
                     case 16: if(g_scr_disttest)     lv_scr_load(g_scr_disttest);     break;
@@ -4492,77 +4373,6 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
             }
         }
         // แตะพื้นที่ว่างในหน้าเมนู (ไม่โดนแผ่นไหน) — ไม่ทำอะไร
-        return;
-    }
-
-    // หน้า 8 (SYSTEM HEALTH): ปุ่ม WIFI / UPDATE ด้านล่าง
-    // แตะที่อื่น: ครั้งที่ 1 = K-LINE LOG, ครั้งที่ 2 = กลับเมนู (พฤติกรรมเดิม)
-    if(g_page == 8){
-        const int32_t TOL = 4;
-        auto hit = [&](lv_obj_t *o) -> bool {
-            if(!o) return false;
-            lv_area_t a; lv_obj_get_coords(o, &a);
-            return x >= a.x1 - TOL && x <= a.x2 + TOL && y >= a.y1 - TOL && y <= a.y2 + TOL;
-        };
-        if(g_page8_view == 0){
-            if(hit(g_p8_btn_wifi)){
-                // Never reboot into setup while riding.
-                if(gps_has_fix() && gps_speed_kmh() > 3.0f){
-                    lv_label_set_text(g_p8_wifi_val, "STOP FIRST");
-                    lv_obj_set_style_text_color(g_p8_wifi_val, ACCENT_ERR, 0);
-                    g_p8_wifi_armed = false; g_p8_wifi_armed_ms = millis() - 1500UL;
-                    return;
-                }
-                if(!g_p8_wifi_armed){
-                    g_p8_wifi_armed = true;
-                    g_p8_wifi_armed_ms = millis();
-                    lv_label_set_text(g_p8_wifi_val, "TAP AGAIN");
-                    lv_obj_set_style_text_color(g_p8_wifi_val, ACCENT_WARN, 0);
-                    if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "REBOOT TO WIFI SETUP");
-                    return;
-                }
-                lv_label_set_text(g_p8_wifi_val, "REBOOTING");
-                lv_refr_now(NULL);
-                ota_wifi_setup_and_reboot();   // never returns
-            }
-            if(hit(g_p8_btn_update)){
-                if(ota_wifi_ssid()[0] == 0){
-                    lv_label_set_text(g_p8_update_val, "SET WIFI 1ST");
-                    lv_obj_set_style_text_color(g_p8_update_val, ACCENT_ERR, 0);
-                    g_p8_update_armed = false; g_p8_update_armed_ms = millis() - 1500UL;   // revert after ~1.5 s
-                    return;
-                }
-                // Never reboot into OTA while riding.
-                if(gps_has_fix() && gps_speed_kmh() > 3.0f){
-                    lv_label_set_text(g_p8_update_val, "STOP FIRST");
-                    lv_obj_set_style_text_color(g_p8_update_val, ACCENT_ERR, 0);
-                    g_p8_update_armed = false; g_p8_update_armed_ms = millis() - 1500UL;
-                    return;
-                }
-                if(!g_p8_update_armed){
-                    g_p8_update_armed = true;
-                    g_p8_update_armed_ms = millis();
-                    lv_label_set_text(g_p8_update_val, "TAP AGAIN");
-                    lv_obj_set_style_text_color(g_p8_update_val, ACCENT_WARN, 0);
-                    if(g_p8_update_cap) lv_label_set_text(g_p8_update_cap, "REBOOT TO UPDATE");
-                    return;
-                }
-                lv_label_set_text(g_p8_update_val, "REBOOTING");
-                lv_refr_now(NULL);
-                ota_request_and_reboot();     // never returns
-            }
-            if(g_scr_fuel_table){
-                g_page8_view = 1;
-                lv_scr_load(g_scr_fuel_table);
-                UI_TRACE_LINE("[UI] PAGE8 HEALTH -> K-LINE LOG SUBVIEW");
-                return;
-            }
-        }
-        g_page8_view = 0;
-        g_p8_update_armed = false;
-        g_p8_wifi_armed = false;
-        go_to_menu();
-        UI_TRACE_LINE("[UI] PAGE8 -> MENU");
         return;
     }
 
@@ -4605,21 +4415,22 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
         return;
     }
 
-    // หน้า 12: ALARM ตอนนี้แยกเป็น 2 หน้าย่อยแตะสลับได้แทนการกลับเมนูทันที
-    // แตะครั้งที่ 1 (เข้าจากเมนู) = ALARM, แตะอีกครั้ง = PERFORMANCE (ย้ายมา
-    // จากหน้า 13 เดิม), แตะอีกครั้ง = กลับไปเมนู
+    // PAGE 12: ALARMS เป็นหนึ่งหน้าของชุดที่เริ่มจาก PAGE 8
+    // แตะ 1 ครั้ง = ไป PAGE 13 (K-LINE TX/RX LOG)
+    // แตะอีก 1 ครั้งบน PAGE 13 (ผ่าน generic handler) = กลับเมนูหลัก
     if(g_page == 12){
-        UI_TRACE("[UI] PAGE12 ALARM/PERFORMANCE TOUCH RELEASE x=%ld y=%ld view=%u\n",
-                      (long)x, (long)y, (unsigned)g_page12_view);
-        if(g_page12_view == 0){
-            g_page12_view = 1;
-            if(g_scr_performance) lv_scr_load(g_scr_performance);
-            UI_TRACE_LINE("[UI] PAGE12 -> PERFORMANCE SUBVIEW");
+        UI_TRACE("[UI] PAGE12 ALARMS TOUCH RELEASE x=%ld y=%ld -> PAGE13\n",
+                      (long)x, (long)y);
+        g_page12_view = 0;
+        if(g_scr_fuel_table){
+            // (แก้ไข) ต้องอัปเดต g_page เป็น 13 ด้วย ไม่งั้นระบบยังคิดว่าอยู่หน้า 12
+            // แตะกี่ครั้งก็วนโหลดหน้า 13 ซ้ำ ไม่กลับเมนูหลักสักที
+            g_page = 13;
+            g_show_black = false;
+            lv_scr_load(g_scr_fuel_table);
             return;
         }
-        g_page12_view = 0;
         go_to_menu();
-        UI_TRACE_LINE("[UI] PAGE12 -> MENU");
         return;
     }
 
@@ -4755,18 +4566,43 @@ bool gauge_ui_touch_toggle_at(int32_t x, int32_t y){
     // หน้าพิเศษใช้ handle_touch_release() จัดการหลังปล่อยนิ้ว
     // เพื่อแยก CLEAR DTC / ปุ่มเมนู ออกจากการแตะทั่วไปสำหรับเปลี่ยนหน้า
     // หน้า 0(เมนู)/1/3/6/7/12/16 ใช้ dedicated release handler เพื่อไม่ให้ touch ถูกกลืน
-    // โดย generic page-toggle หรือ LVGL click event (หน้า 12 ต้องแตะสลับ
-    // ALARM/PERFORMANCE 2 รอบก่อนกลับเมนู จึงต้องมี state คั่นแบบเดียวกัน)
-    if(g_page == 0 || g_page == 1 || g_page == 3 || g_page == 6 || g_page == 7 || g_page == 8 || g_page == 12 || g_page == 16){
+    // โดย generic page-toggle หรือ LVGL click event; PAGE 12 ใช้ handler เฉพาะเพื่อ
+    // ส่งต่อไป PAGE 13 ให้ครบ sequence 8 -> 9 -> 11 -> 12 -> 13 -> MENU
+    if(g_page == 0 || g_page == 1 || g_page == 3 || g_page == 6 || g_page == 7 || g_page == 12 || g_page == 16){
         return false;
     }
 
-    // ทุกหน้าที่เหลือ (2,4,5,8-11,13,14): แตะที่ไหนก็ได้ = กลับไปหน้าเมนู
-    // (เดิมเป็นการไล่หน้าถัดไปแบบวนลูป 1->2->...->14->1)
-    g_page = 0;
-    g_show_black = false;
-    lv_scr_load(g_scr_menu);
+    // ชุด PAGE 8 จะไล่ทีละหน้า: 8 -> 9 -> 11 -> 12 -> 13 -> MENU
+    // ทุกหน้าอื่นที่ไม่ได้อยู่ในชุดนี้ แตะ 1 ครั้ง = กลับเมนูตามเดิม
+    uint8_t next_page = 0;
+    switch(g_page){
+        case 8:  next_page = 9;  break;
+        case 9:  next_page = 11; break;
+        case 11: next_page = 12; break;
+        case 13: next_page = 0;  break;
+        default: next_page = 0;  break;
+    }
+
+    if(next_page == 0){
+        g_page = 0;
+        g_show_black = false;
+        lv_scr_load(g_scr_menu);
+        return true;
+    }
+
+    g_page = next_page;
+    g_show_black = (g_page == 3);
+    switch(g_page){
+        case 9:  if(g_scr_watchdog)    lv_scr_load(g_scr_watchdog);    break;
+        case 11: if(g_scr_data_logger) lv_scr_load(g_scr_data_logger); break;
+        case 12: if(g_scr_alarm){ g_page12_view = 0; lv_scr_load(g_scr_alarm); } break;
+        default: return false;
+    }
     return true;
+}
+
+bool gauge_ui_is_dtc_page(){
+    return g_page == 6;
 }
 
 uint8_t gauge_ui_get_page(){ return g_page; }
