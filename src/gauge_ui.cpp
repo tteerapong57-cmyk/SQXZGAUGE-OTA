@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <stdarg.h>
 #include <lvgl.h>
 #include <LittleFS.h>
 #include <esp_system.h>
@@ -59,6 +60,12 @@ static lv_obj_t *g_scr_data_logger = NULL;
 static lv_obj_t *g_scr_alarm = NULL;
 static lv_obj_t *g_scr_performance = NULL;
 static lv_obj_t *g_scr_fueltrim = NULL;
+// PAGE 13 (เดิมคือ PERFORMANCE ซึ่งย้ายไปเป็นหน้าย่อยของ PAGE 12 แล้ว):
+// ตอนนี้เป็นหน้า K-LINE TX / RX LOG ล้วน ๆ (แสดงเฉพาะค่า log ไม่มีปุ่ม/ค่าอื่น)
+// ชื่อตัวแปร g_scr_fuel_table คงไว้เพื่อไม่ให้กระทบโค้ดส่วนอื่นที่อ้างถึง
+static lv_obj_t *g_scr_fuel_table = NULL;
+static lv_obj_t *g_fuel_table_label = NULL;
+static lv_obj_t *g_fuel_table_segments[8] = {NULL};
 // PAGE 14 is now the second main instrument cluster, styled after the
 // reference motorcycle dashboard: top tachometer arc, large GPS speed,
 // fuel-style segment row, and three live status fields at the bottom.
@@ -92,6 +99,12 @@ static lv_obj_t *g_cluster_bezel = NULL;
 // compatibility; the screen itself is repurposed as the cluster above.
 static lv_obj_t *g_fueltrim_value = NULL;
 static lv_obj_t *g_fueltrim_status = NULL;
+// PAGE 13: label เดียวแสดง K-LINE TX/RX LOG ทั้งหมด (ใช้ buffer static + lv_label_set_text_static
+// เพื่อไม่ให้เกิด heap alloc/free ซ้ำ ๆ ใน LVGL pool ทุกครั้งที่ log เปลี่ยน)
+static lv_obj_t *g_kline_log_label = NULL;
+#define KLINE_LOG_TEXT_LEN 1900   // 8 รายการ x (TX<=24B + RX<=40B) พร้อมหัวบรรทัด
+static char g_kline_log_text[KLINE_LOG_TEXT_LEN] = "--";
+
 // ── PAGE 16: DISTANCE TEST — ตั้งระยะทาง (เมตร) แล้ววัดเวลา/ความเร็วเฉลี่ย
 // ที่ใช้วิ่งครบระยะนั้นจริง โดยอ้างอิงระยะทางสะสมจาก GPS (วิธีเดียวกับ TRIP)
 static lv_obj_t *g_scr_disttest = NULL;
@@ -442,6 +455,9 @@ static uint8_t g_page = 0;
 // หน้า 12 (ALARM) ตอนนี้แยกเป็น 2 หน้าย่อยแตะสลับได้: 0=ALARM, 1=PERFORMANCE
 // (PERFORMANCE ย้ายมาจากหน้า 13 เดิม) แตะครั้งที่ 3 กลับไปเมนู
 static uint8_t g_page12_view = 0;
+// หน้า 8 (SYSTEM HEALTH) มี K-LINE TX/RX LOG รวมเป็นหน้าย่อย: 0=HEALTH, 1=K-LINE LOG
+// แตะครั้งที่ 1 = เปิด K-LINE LOG, แตะครั้งที่ 2 = กลับไปเมนู
+static uint8_t g_page8_view = 0;
 // P08 bottom buttons: WIFI (cycle network) and UPDATE (reboot into OTA mode)
 static lv_obj_t *g_p8_btn_wifi = nullptr, *g_p8_btn_update = nullptr;
 static lv_obj_t *g_p8_wifi_val = nullptr, *g_p8_wifi_cap = nullptr, *g_p8_update_val = nullptr, *g_p8_update_cap = nullptr;
@@ -587,7 +603,7 @@ static void theme_apply_obj(lv_obj_t *obj){
 static void settings_apply_theme(){
     lv_obj_t *roots[] = {g_scr_main, g_scr_black, g_scr_graph, g_scr_afr_rpm, g_scr_dtc, g_scr_log, g_scr_settings,
                          g_scr_health, g_scr_watchdog, g_scr_sensors, g_scr_data_logger, g_scr_alarm, g_scr_performance, g_scr_fueltrim,
-                         g_scr_disttest};
+                         g_scr_fuel_table, g_scr_disttest};
     for(auto r : roots) if(r) theme_apply_obj(r);
     for(int i=0;i<g_axis_lbl_n;i++) if(g_axis_lbls[i])
         lv_obj_set_style_text_color(g_axis_lbls[i], g_day_mode ? lv_color_hex(0x000000) : g_axis_night_col[i], 0);
@@ -620,6 +636,11 @@ static void settings_apply_theme(){
     if(g_cluster_status_line) lv_obj_set_style_text_color(g_cluster_status_line, kline_is_connected() ? ACCENT_OK : ACCENT_WARN, 0);
     // AFR value color is re-derived every tick from the live reading (see
     // gauge_ui_update), so no theme-generic override is applied to it here.
+    if(g_fuel_table_label) lv_obj_set_style_text_color(g_fuel_table_label, theme_subtext(), 0);
+    for(int i=0;i<8;i++) if(g_fuel_table_segments[i]){
+        lv_obj_set_style_bg_color(g_fuel_table_segments[i], GRAY_LINE, 0);
+        lv_obj_set_style_border_color(g_fuel_table_segments[i], theme_border(), 0);
+    }
     for(int i=0;i<=8;i++) if(g_cluster_tacho_labels[i]){
         lv_obj_set_style_text_color(g_cluster_tacho_labels[i], (i>=7) ? ACCENT_ERR : theme_subtext(), 0);
     }
@@ -1158,6 +1179,21 @@ static void extended_pages_init(){
     ext_metric(g_scr_performance, 165,152, 148, 54, "TRIP",      &g_perf_values[5]);
     mk_label(g_scr_performance,&A4SPEED_14,GRAY_LBL,"Live drive statistics",LV_ALIGN_TOP_MID,0,216);
 
+    // PAGE 13: K-LINE TX / RX LOG (แสดงเฉพาะค่า log)
+    // เดิมหน้านี้มีกล่อง TARGET FUEL TRIM, ปุ่ม -/+, สถานะ ECU WRITE, ปุ่ม APPLY
+    // และ log แค่ 3 บรรทัด — ตอนนี้เอาออกทั้งหมด เหลือ log เต็มหน้าจอ
+    // (ใหม่สุดอยู่บนสุด: บรรทัดแรก = TX, ตามด้วย RX ที่ตัดบรรทัดอัตโนมัติ)
+    g_scr_fuel_table = ext_screen("K-LINE TX / RX LOG", 8);
+
+    g_kline_log_label = lv_label_create(g_scr_fuel_table);
+    lv_obj_set_style_text_font(g_kline_log_label, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(g_kline_log_label, WHITE, 0);
+    lv_obj_set_style_text_line_space(g_kline_log_label, 1, 0);
+    lv_label_set_long_mode(g_kline_log_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_kline_log_label, 6, 27);
+    lv_obj_set_size(g_kline_log_label, 308, 209);   // ข้อความที่เกินความสูงนี้ถูกตัดทิ้งเอง
+    lv_label_set_text_static(g_kline_log_label, g_kline_log_text);
+
     // PAGE 14: SECOND INSTRUMENT CLUSTER — motorsport / OEM-style dash
     // Visual-only redesign. Data flow and live update logic remain unchanged.
     // The layout uses a layered bezel, segmented tach arc, framed speed panel,
@@ -1601,6 +1637,71 @@ static void fueltrim_apply_cb(lv_event_t *e){
     }
 }
 
+// ต่อข้อความลง buffer แบบปลอดภัย (ไม่เกิน cap-1) คืนค่าความยาวใหม่
+static size_t klog_append(char *buf, size_t cap, size_t used, const char *fmt, ...){
+    if(used + 1 >= cap) return used;
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf + used, cap - used, fmt, ap);
+    va_end(ap);
+    if(r < 0) return used;
+    size_t nu = used + (size_t)r;
+    return (nu >= cap) ? (cap - 1) : nu;
+}
+
+// PAGE 13: สร้างข้อความ K-LINE TX/RX LOG (ใหม่สุดก่อน) แล้วอัปเดต label
+// รูปแบบต่อ 1 รายการ:
+//   > 123.456s TX 72 05 71 17 01
+//   RX 02 1F 71 17 ....            (ยาวเกินความกว้างจะตัดบรรทัดเอง)
+// '>' = ได้ตอบกลับจาก ECU, '!' = ไม่มี RX (ไม่ตอบ/หมดเวลา)
+static void kline_log_page_update(){
+    if(!g_kline_log_label) return;
+
+    // จำกัดความถี่ ~6-7 Hz: log ใน ring buffer หมุนเร็วกว่าที่ตาอ่านทัน
+    // และลดงาน redraw ของ LVGL
+    static uint32_t s_last_ms = 0;
+    const uint32_t now = millis();
+    if(now - s_last_ms < 150UL) return;
+    s_last_ms = now;
+
+    // ลายเซ็นของ log = จำนวนรายการ + เวลาของรายการใหม่สุด
+    // ถ้าไม่เปลี่ยนก็ไม่ต้อง rebuild / ไม่ต้อง redraw
+    static bool     s_sig_valid = false;
+    static uint8_t  s_sig_n = 0;
+    static uint32_t s_sig_ms = 0;
+
+    const uint8_t n = kline_txrx_log_count();
+    KlineTxRxLogEntry e{};
+    uint32_t newest_ms = 0;
+    if(n > 0 && kline_get_txrx_log(0, &e)) newest_ms = e.ms;
+
+    if(s_sig_valid && n == s_sig_n && newest_ms == s_sig_ms) return;
+    s_sig_valid = true; s_sig_n = n; s_sig_ms = newest_ms;
+
+    size_t used = 0;
+    g_kline_log_text[0] = '\0';
+
+    for(uint8_t i = 0; i < n; ++i){
+        if(!kline_get_txrx_log(i, &e)) break;
+        used = klog_append(g_kline_log_text, sizeof(g_kline_log_text), used,
+                           "%s%c %lu.%03lus TX", (i ? "\n" : ""), e.ok ? '>' : '!',
+                           (unsigned long)(e.ms / 1000UL), (unsigned long)(e.ms % 1000UL));
+        for(uint8_t j = 0; j < e.tx_len; ++j)
+            used = klog_append(g_kline_log_text, sizeof(g_kline_log_text), used, " %02X", e.tx[j]);
+        used = klog_append(g_kline_log_text, sizeof(g_kline_log_text), used, "\nRX");
+        if(e.rx_len == 0){
+            used = klog_append(g_kline_log_text, sizeof(g_kline_log_text), used, " --");
+        }else{
+            for(uint8_t j = 0; j < e.rx_len; ++j)
+                used = klog_append(g_kline_log_text, sizeof(g_kline_log_text), used, " %02X", e.rx[j]);
+        }
+    }
+    if(used == 0) klog_append(g_kline_log_text, sizeof(g_kline_log_text), 0, "--");
+
+    // เรียกซ้ำด้วย pointer เดิมเพื่อให้ LVGL อ่านเนื้อหา buffer ใหม่และ refresh
+    lv_label_set_text_static(g_kline_log_label, g_kline_log_text);
+}
+
 // ── PAGE 16: DISTANCE TEST — ควบคุมการเลือกระยะทาง/เริ่ม/หยุด/รีเซ็ต ──────
 static void disttest_save_preset(){
     if(!g_disttest_prefs_ready) return;
@@ -1803,6 +1904,9 @@ static void extended_pages_update(){
     // Update heavyweight secondary screens only while they are visible.
     // Their widgets are persistent, so there is no need to redraw hidden pages.
     cluster_update();
+
+    // PAGE 8 sub-view: K-LINE TX / RX LOG — อัปเดตเฉพาะตอนหน้านี้แสดงอยู่
+    if(g_page == 8 && g_page8_view == 1) kline_log_page_update();
 
     // PAGE 8 health data is intentionally sampled once per second. This is
     // diagnostic UI, not a real-time gauge, so faster writes only add LVGL work.
@@ -4386,7 +4490,7 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
                         if(g_scr_dtc)               lv_scr_load(g_scr_dtc);
                         break;
                     case 7:  if(g_scr_log)          lv_scr_load(g_scr_log);          break;
-                    case 8:  if(g_scr_health) lv_scr_load(g_scr_health); break;
+                    case 8:  g_page8_view = 0; if(g_scr_health) lv_scr_load(g_scr_health); break;
                     case 10: if(g_scr_sensors)      lv_scr_load(g_scr_sensors);      break;
                     case 14: if(g_scr_fueltrim)     lv_scr_load(g_scr_fueltrim);     break;
                     case 15: { void *ntp = nullptr; sqxzgauge_page_get_screen(&ntp); if(ntp) lv_scr_load((lv_obj_t*)ntp); } break;
@@ -4401,7 +4505,7 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
     }
 
     // หน้า 8 (SYSTEM HEALTH): ปุ่ม WIFI / UPDATE ด้านล่าง
-    // แตะที่อื่น = กลับเมนู
+    // แตะที่อื่น: ครั้งที่ 1 = K-LINE LOG, ครั้งที่ 2 = กลับเมนู (พฤติกรรมเดิม)
     if(g_page == 8){
         const int32_t TOL = 4;
         auto hit = [&](lv_obj_t *o) -> bool {
@@ -4409,7 +4513,7 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
             lv_area_t a; lv_obj_get_coords(o, &a);
             return x >= a.x1 - TOL && x <= a.x2 + TOL && y >= a.y1 - TOL && y <= a.y2 + TOL;
         };
-        {
+        if(g_page8_view == 0){
             if(hit(g_p8_btn_wifi)){
                 // Never reboot into setup while riding.
                 if(gps_has_fix() && gps_speed_kmh() > 3.0f){
@@ -4456,7 +4560,14 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
                 lv_refr_now(NULL);
                 ota_request_and_reboot();     // never returns
             }
+            if(g_scr_fuel_table){
+                g_page8_view = 1;
+                lv_scr_load(g_scr_fuel_table);
+                UI_TRACE_LINE("[UI] PAGE8 HEALTH -> K-LINE LOG SUBVIEW");
+                return;
+            }
         }
+        g_page8_view = 0;
         g_p8_update_armed = false;
         g_p8_wifi_armed = false;
         go_to_menu();
@@ -4648,7 +4759,7 @@ bool gauge_ui_touch_toggle_at(int32_t x, int32_t y){
     (void)x; (void)y;
     if(!g_scr_menu || !g_scr_main || !g_scr_black || !g_scr_graph || !g_scr_afr_rpm || !g_scr_dtc || !g_scr_log || !g_scr_settings ||
        !g_scr_health || !g_scr_watchdog || !g_scr_sensors || !g_scr_data_logger || !g_scr_alarm || !g_scr_performance || !g_scr_fueltrim ||
-       !g_scr_disttest || !sqxzgauge_page_ready()) return false;
+       !g_scr_fuel_table || !g_scr_disttest || !sqxzgauge_page_ready()) return false;
 
     // หน้าพิเศษใช้ handle_touch_release() จัดการหลังปล่อยนิ้ว
     // เพื่อแยก CLEAR DTC / ปุ่มเมนู ออกจากการแตะทั่วไปสำหรับเปลี่ยนหน้า
