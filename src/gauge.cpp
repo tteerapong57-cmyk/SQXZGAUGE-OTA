@@ -23,7 +23,6 @@ namespace {
 #define NTP_ERR      lv_color_hex(0xff4757)
 #define NTP_COLD     lv_color_hex(0x4a90e2)
 #define NTP_ECT_HIGH_BG lv_color_hex(0xffe6e6)
-#define NTP_AFR_INVALID lv_color_hex(0x8fa3bd)
 // (แก้ไข) ฟอนต์ AFR หน้า 15: โหมดกลางวัน = ดำสนิท, โหมดกลางคืน = ขาวสนิท
 #define NTP_AFR_DAY     lv_color_hex(0x000000)
 #define NTP_AFR_NIGHT   lv_color_hex(0xffffff)
@@ -642,20 +641,20 @@ void sqxzgauge_page_update() {
     // (NTP_AFR_NIGHT) เสมอ ไม่ว่าจะอยู่สถานะไหนก็ตาม
     lv_obj_set_style_text_color(g_lbl_afr, g_day_mode_applied ? NTP_AFR_DAY : NTP_AFR_NIGHT, 0);
 
-    const int new_ect_state = (ect > 110.0f) ? 2 : ((ect < 50.0f) ? 1 : 0);
+    const int new_ect_state = (ect >= ALARM_ECT_HIGH_C) ? 2 : ((ect < ECT_COLD_C) ? 1 : 0);
     if (new_ect_state != g_ect_state) {
         g_ect_state = new_ect_state;
         const bool day = gauge_ui_is_day_mode();
         const lv_color_t ect_col = (new_ect_state == 2) ? NTP_ERR : ((new_ect_state == 1) ? NTP_COLD : (day ? NTP_DAY_SECONDARY : NTP_NIGHT_SECONDARY));
         lv_obj_set_style_text_color(g_lbl_ect, ect_col, 0);
     }
-    const bool ect_hot_bg = (ect > 110.0f);
+    const bool ect_hot_bg = (ect >= ALARM_ECT_HIGH_C);
     if (ect_hot_bg != g_ect_hot_bg) {
         g_ect_hot_bg = ect_hot_bg;
         lv_obj_set_style_bg_color(g_box_ect, ect_hot_bg ? NTP_ECT_HIGH_BG : (gauge_ui_is_day_mode() ? NTP_DAY_BOX : NTP_NIGHT_BOX), 0);
     }
 
-    const bool batt_low = (batt > 0.0f && batt < 12.0f);
+    const bool batt_low = (batt > 0.0f && batt <= ALARM_BATT_LOW_V);
     if (batt_low != g_batt_low) {
         g_batt_low = batt_low;
         lv_obj_set_style_text_color(g_lbl_batt, batt_low ? NTP_ERR : (gauge_ui_is_day_mode() ? NTP_DAY_SECONDARY : NTP_NIGHT_SECONDARY), 0);
@@ -665,7 +664,7 @@ void sqxzgauge_page_update() {
     set_label_fmt_if_changed(g_lbl_speed_max, g_txt_speed_max, sizeof(g_txt_speed_max), "SPEED MAX : %.0f", g_speed_max);
 
     const float rpm_bar = smooth_rpm_bar(rpm);
-    int active = (int)lroundf((rpm_bar / 10000.0f) * NUM_TICKS);
+    int active = (int)lroundf((rpm_bar / RPM_GAUGE_MAX) * NUM_TICKS);
     if (active < 0) active = 0;
     if (active > NUM_TICKS) active = NUM_TICKS;
     const bool redline = active >= (int)(NUM_TICKS * 0.90f);

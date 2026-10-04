@@ -79,7 +79,7 @@ static void sgLogKLineTransaction(const uint8_t *tx, uint8_t txLen,
   if (nRx < KLINE_LOG_RX_MAX) memset(e.rx + nRx, 0, KLINE_LOG_RX_MAX - nRx);
   if (nTx < KLINE_LOG_TX_MAX) memset(e.tx + nTx, 0, KLINE_LOG_TX_MAX - nTx);
   sgTxRxLogHead = (uint8_t)((sgTxRxLogHead + 1) % KLINE_LOG_CAP);
-  if (sgTxRxLogCount < KLINE_LOG_CAP) ++sgTxRxLogCount;
+  if (sgTxRxLogCount < KLINE_LOG_CAP) sgTxRxLogCount = sgTxRxLogCount + 1;
   portEXIT_CRITICAL(&sgTxRxLogMux);
 }
 
@@ -113,15 +113,18 @@ static uint8_t sgPollStep = 0;
 static bool sgReconnectPending = false;
 static SemaphoreHandle_t sgKlineMutex = nullptr;
 static TaskHandle_t sgKlineTaskHandle = nullptr;
+// สถานะเหล่านี้ถูกอ่าน/เขียนข้าม core (UI core1 <-> K-Line task core0)
+// จึงเป็น volatile; ส่วนสตริงใช้ critical section สั้น ๆ ด้านล่างแทน mutex ยาว
 static volatile bool sgDtcScanRequested = false;
-static bool sgDtcScanBusy = false;
-static bool sgDtcSummaryValid = false;
+static volatile bool sgDtcScanBusy = false;
+static volatile bool sgDtcSummaryValid = false;
 static char sgDtcSummary[160] = "";
+static portMUX_TYPE sgDtcMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ── Async clear+verify state (see kline_request_clear_dtc in kline.h) ──
 static volatile bool sgClearRequested = false;
-static bool sgClearBusy = false;
-static bool sgClearDone = false;   // result ready, not yet collected by UI
+static volatile bool sgClearBusy = false;
+static volatile bool sgClearDone = false;   // result ready, not yet collected by UI
 static char sgClearBefore[180] = "";
 static char sgClearAfter[180]  = "";
 static KlineClearResult sgClearResult = KLINE_CLEAR_NOT_CONNECTED;
@@ -341,7 +344,7 @@ static bool sgKLineWakeup() {
 }
 
 static void sgScheduleReconnect(const char *reason) {
-  ++sgReconnectCount;
+  sgReconnectCount = sgReconnectCount + 1;
   if (ENABLE_RUNTIME_DEBUG) {
     Serial.printf(
       "[K-LINE] Reconnecting... (%s)\n",
@@ -974,28 +977,21 @@ static bool sgReadDtcMemorySummary(char *out, size_t outLen, bool *hasDtcOut) {
   return allOk;
 }
 
-bool kline_read_dtc_memory(char *out, size_t outLen) {
-  // Compatibility API: return the last completed asynchronous scan.
-  return kline_get_dtc_summary(out, outLen);
-}
-
 void kline_request_dtc_scan(){
-  if (sgKlineMutex != nullptr && xSemaphoreTake(sgKlineMutex, 0) != pdTRUE) {
-    return;
-  }
+  // (แก้) เดิมพยายามจับ sgKlineMutex แบบ timeout 0 แต่ K-Line task ถือ mutex
+  // ไว้เกือบตลอดเวลา คำขอจึงถูกทิ้งเงียบ ๆ บ่อย ตอนนี้แค่ตั้ง flag ให้ task ไปทำเอง
   if (sgGauge.ecuConnected && !sgDtcScanBusy) {
     sgDtcScanRequested = true;
+    portENTER_CRITICAL(&sgDtcMux);
     sgDtcSummaryValid = false;
+    portEXIT_CRITICAL(&sgDtcMux);
   }
-  if (sgKlineMutex != nullptr) xSemaphoreGive(sgKlineMutex);
 }
 
 bool kline_get_dtc_summary(char *out, size_t outLen){
   if (out == nullptr || outLen == 0) return false;
-  if (sgKlineMutex != nullptr && xSemaphoreTake(sgKlineMutex, 0) != pdTRUE) {
-    return false;
-  }
 
+  portENTER_CRITICAL(&sgDtcMux);
   const bool valid = sgDtcSummaryValid;
   if (valid) {
     strncpy(out, sgDtcSummary, outLen - 1);
@@ -1003,8 +999,7 @@ bool kline_get_dtc_summary(char *out, size_t outLen){
   } else {
     out[0] = '\0';
   }
-
-  if (sgKlineMutex != nullptr) xSemaphoreGive(sgKlineMutex);
+  portEXIT_CRITICAL(&sgDtcMux);
   return valid;
 }
 
@@ -1131,9 +1126,11 @@ static void sgProcessDtcScanRequest() {
   char summary[sizeof(sgDtcSummary)] = {0};
   const bool ok = sgReadDtcMemorySummary(summary, sizeof(summary), nullptr);
   if (ok) {
+    portENTER_CRITICAL(&sgDtcMux);
     strncpy(sgDtcSummary, summary, sizeof(sgDtcSummary) - 1);
     sgDtcSummary[sizeof(sgDtcSummary) - 1] = '\0';
     sgDtcSummaryValid = true;
+    portEXIT_CRITICAL(&sgDtcMux);
   }
 
   sgDtcScanBusy = false;
@@ -1186,9 +1183,11 @@ static void sgProcessClearDtcRequest() {
                       afterOk ? 1 : 0, hadAfter ? 1 : 0, after);
       }
       if (afterOk) {
+        portENTER_CRITICAL(&sgDtcMux);
         strncpy(sgDtcSummary, after, sizeof(sgDtcSummary) - 1);
         sgDtcSummary[sizeof(sgDtcSummary) - 1] = '\0';
         sgDtcSummaryValid = true;
+        portEXIT_CRITICAL(&sgDtcMux);
       }
       verified = afterOk && !hadAfter;
       if (ENABLE_RUNTIME_DEBUG) {
@@ -1200,6 +1199,7 @@ static void sgProcessClearDtcRequest() {
     snprintf(after, sizeof(after), "RESCAN SKIPPED: CLEAR FAILED");
   }
 
+  portENTER_CRITICAL(&sgDtcMux);
   strncpy(sgClearBefore, before, sizeof(sgClearBefore) - 1);
   sgClearBefore[sizeof(sgClearBefore) - 1] = '\0';
   strncpy(sgClearAfter, after, sizeof(sgClearAfter) - 1);
@@ -1208,6 +1208,7 @@ static void sgProcessClearDtcRequest() {
   sgClearVerified = verified;
   sgClearBusy     = false;
   sgClearDone     = true;
+  portEXIT_CRITICAL(&sgDtcMux);
 }
 
 void kline_request_clear_dtc(){
@@ -1216,15 +1217,12 @@ void kline_request_clear_dtc(){
   sgClearRequested = true;
 }
 
-bool kline_clear_dtc_is_busy(){
-  return sgClearRequested || sgClearBusy;
-}
-
 bool kline_take_clear_dtc_result(KlineClearResult *result, bool *verified,
                                   char *before_out, size_t before_len,
                                   char *after_out, size_t after_len){
   if (!sgClearDone) return false;
 
+  portENTER_CRITICAL(&sgDtcMux);
   if (result) *result = sgClearResult;
   if (verified) *verified = sgClearVerified;
   if (before_out && before_len) {
@@ -1235,8 +1233,8 @@ bool kline_take_clear_dtc_result(KlineClearResult *result, bool *verified,
     strncpy(after_out, sgClearAfter, after_len - 1);
     after_out[after_len - 1] = '\0';
   }
-
   sgClearDone = false; // consumed
+  portEXIT_CRITICAL(&sgDtcMux);
   return true;
 }
 
@@ -1300,7 +1298,7 @@ bool kline_get_snapshot(KlineSnapshot *out) {
 }
 
 void kline_init(){
-  memset(&sgGauge, 0, sizeof(sgGauge));
+  memset((void*)&sgGauge, 0, sizeof(sgGauge));
   portENTER_CRITICAL(&sgSnapshotMux);
   memset(&sgPublishedSnapshot, 0, sizeof(sgPublishedSnapshot));
   portEXIT_CRITICAL(&sgSnapshotMux);
@@ -1309,13 +1307,15 @@ void kline_init(){
   sgT20LastGoodMs = 0;
   sgReconnectCount = 0;
   sgTaskLastRunMs = millis();
-  memset(&sgDtc, 0, sizeof(sgDtc));
+  memset((void*)&sgDtc, 0, sizeof(sgDtc));
   memset(sgMainPayload, 0, sizeof(sgMainPayload));
   memset(sgAuxPayload, 0, sizeof(sgAuxPayload));
   sgDtcScanRequested = false;
   sgDtcScanBusy = false;
+  portENTER_CRITICAL(&sgDtcMux);
   sgDtcSummaryValid = false;
   sgDtcSummary[0] = '\0';
+  portEXIT_CRITICAL(&sgDtcMux);
   sgEcmIdValid = false;
   sgEcmIdRequested = false;
   sgEcmIdHex[0] = '\0';
@@ -1373,7 +1373,7 @@ void kline_start_background(){
   BaseType_t ok = xTaskCreatePinnedToCore(
       sgKlineTask,
       "kline",
-      4096,
+      8192,   // เดิม 4096: path ลบ DTC มี buffer ~520 B + Serial.printf กิน stack มาก
       nullptr,
       2,
       &sgKlineTaskHandle,
@@ -1421,11 +1421,6 @@ uint32_t kline_reconnect_count(){
   return sgReconnectCount;
 }
 
-uint32_t kline_task_runtime_ms(){
-  const uint32_t last = sgTaskLastRunMs;
-  return last ? (millis() - last) : 0;
-}
-
 static bool snapshotT17Fresh(const KlineSnapshot &s, uint32_t now){
   return s.connected && s.t17_valid && s.t17_last_good_ms != 0 &&
          (now - s.t17_last_good_ms) < KLINE_LINK_STALE_MS;
@@ -1471,10 +1466,3 @@ bool kline_snapshot_sensor_valid(const KlineSnapshot *snapshot, KlineSensor sens
   }
 }
 
-bool kline_sensor_valid(KlineSensor sensor){
-  KlineSnapshot s{};
-  return kline_get_snapshot(&s) && kline_snapshot_sensor_valid(&s, sensor);
-}
-
-uint32_t kline_t17_last_good_ms(){ return sgT17LastGoodMs; }
-uint32_t kline_t20_last_good_ms(){ return sgT20LastGoodMs; }

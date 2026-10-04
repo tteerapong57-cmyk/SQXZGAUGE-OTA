@@ -1,0 +1,55 @@
+name: Build & Release firmware
+
+# Push a tag like v7.11  ->  builds firmware.bin and publishes a GitHub Release
+# containing firmware.bin + version.txt (the gauge downloads these two files).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Stamp version from tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/^#define APP_VERSION .*/#define APP_VERSION \"${VER}\"/" include/app_config.h
+          grep APP_VERSION include/app_config.h
+          echo "VER=${VER}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: pio run -e esp32-cyd
+
+      - name: Create version.txt
+        run: |
+          cp .pio/build/esp32-cyd/firmware.bin firmware.bin
+          MD5=$(md5sum firmware.bin | cut -d' ' -f1)
+          echo "${VER} ${MD5}" > version.txt
+          cat version.txt
+          ls -l firmware.bin
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            firmware.bin
+            version.txt

@@ -41,7 +41,6 @@ enum KlineClearResult {
 
 // Read stored DTCs from ECU memory (queries 73/01..03).
 // out receives a compact human-readable summary.
-bool kline_read_dtc_memory(char *out, size_t out_len);
 void kline_request_dtc_scan();
 bool kline_get_dtc_summary(char *out, size_t out_len);
 
@@ -49,7 +48,6 @@ bool kline_get_dtc_summary(char *out, size_t out_len);
 // Async clear + verify. The background task performs the full read -> clear ->
 // reconnect -> rescan sequence while the UI remains responsive.
 void kline_request_clear_dtc();
-bool kline_clear_dtc_is_busy();
 // Returns true and fills the outputs exactly once when a requested clear
 // finishes; returns false (outputs untouched) while still busy or if there
 // is no new result to collect. Call this from the UI thread on a timer.
@@ -94,7 +92,6 @@ bool kline_get_snapshot(KlineSnapshot *out);
 // Stability/health helpers
 uint32_t kline_last_good_data_ms();
 uint32_t kline_reconnect_count();
-uint32_t kline_task_runtime_ms();
 
 // Phase 2: per-frame sensor validity. A sensor is valid only while its
 // source table has produced a fresh, structurally valid frame.
@@ -111,10 +108,7 @@ enum KlineSensor : uint8_t {
   KLINE_SENSOR_STFT,
   KLINE_SENSOR_O2_HEATER
 };
-bool kline_sensor_valid(KlineSensor sensor);
 bool kline_snapshot_sensor_valid(const KlineSnapshot *snapshot, KlineSensor sensor);
-uint32_t kline_t17_last_good_ms();
-uint32_t kline_t20_last_good_ms();
 
 // ── ECM ID (Query 71, table 00) ─────────────────────────────────────────
 // Read once automatically right after each successful ECU connect.

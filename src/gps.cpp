@@ -9,6 +9,9 @@
 // ใช้ HardwareSerial(1) เพราะ K-line ใน kline.cpp ใช้ HardwareSerial(2) ไปแล้ว
 constexpr int GPS_RX_PIN = 35;
 constexpr int GPS_BAUD = 9600;
+// ค่าเริ่มต้นของ HardwareSerial คือ 256 ไบต์ (เต็มใน ~270 ms ที่ 9600 baud)
+// ถ้า LVGL/LittleFS บล็อกนานกว่านั้น NMEA จะหาย จึงขยายเป็น 1 KB
+constexpr size_t GPS_RX_BUFFER = 1024;
 
 static TinyGPSPlus    gps;
 static HardwareSerial GPS_SERIAL(1);
@@ -29,15 +32,16 @@ static float   s_speed_ema        = 0.0f;
 static bool    s_speed_zero_lock  = true;   // เริ่มต้นล็อกไว้ที่ 0 ก่อน จนกว่าจะพิสูจน์ว่าเคลื่อนที่จริง
 static uint8_t s_move_confirm     = 0;      // นับจำนวนครั้งติดต่อกันที่ความเร็ว "ดูเหมือน" วิ่งจริง
 
-constexpr float   SPEED_EMA_ALPHA       = 0.30f; // ยิ่งน้อยยิ่งนิ่ง แต่ตอบสนองช้าลง
-constexpr float   SPEED_DEADBAND_KMH    = 2.5f;  // ต่ำกว่านี้ถือว่าเป็น noise ปัดเป็น 0 (ตอนกำลังวิ่งอยู่)
-constexpr float   SPEED_LOCK_EXIT_KMH   = 5.0f;  // ต้องเกินค่านี้ถึงจะเริ่มนับว่าอาจวิ่งจริง (สูงกว่า deadband พอควร กัน noise หลอก)
-constexpr uint8_t SPEED_CONFIRM_SAMPLES = 3;     // ต้องเกิน LOCK_EXIT ติดกันกี่ครั้ง (~3 วินาที ที่ 1Hz) ถึงจะปลดล็อก
+constexpr float   SPEED_EMA_ALPHA       = 0.50f; // ยิ่งน้อยยิ่งนิ่ง แต่ตอบสนองช้าลง
+constexpr float   SPEED_DEADBAND_KMH    = 1.5f;  // ต่ำกว่านี้ถือว่าเป็น noise ปัดเป็น 0 (ตอนกำลังวิ่งอยู่)
+constexpr float   SPEED_LOCK_EXIT_KMH   = 3.0f;  // ต้องเกินค่านี้ถึงจะเริ่มนับว่าอาจวิ่งจริง (สูงกว่า deadband พอควร กัน noise หลอก)
+constexpr uint8_t SPEED_CONFIRM_SAMPLES = 2;     // ต้องเกิน LOCK_EXIT ติดกันกี่ครั้ง (~3 วินาที ที่ 1Hz) ถึงจะปลดล็อก
 constexpr int     MIN_SATS_FOR_SPEED    = 4;     // ดาวเทียมน้อยกว่านี้ = fix อ่อน ไม่เชื่อค่าความเร็วที่ได้ (บังคับเป็น noise)
 
 void gps_init(){
     GPS_SERIAL.end();
     delay(10);
+    GPS_SERIAL.setRxBufferSize(GPS_RX_BUFFER);   // ต้องเรียกก่อน begin()
     GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, -1);
     s_last_data_ms = millis();
     s_last_recovery_ms = millis();
@@ -70,7 +74,10 @@ void gps_update(){
                     } else {
                         s_move_confirm = 0;      // มีจังหวะไหนต่ำกว่าเกณฑ์ นับใหม่ตั้งแต่ต้น
                     }
-                    s_speed_ema = 0.0f;
+                    // (แก้บั๊ก) เดิมสั่ง s_speed_ema = 0 ทุกครั้ง ทับค่า raw ที่เพิ่งตั้งตอนปลดล็อก
+                    // ทำให้ออกตัวแล้วความเร็วเริ่มที่ครึ่งเดียว/ล็อกกลับเป็น 0 ซ้ำ
+                    // ตอนนี้ล้างเป็น 0 เฉพาะเมื่อยังล็อกอยู่จริง
+                    if(s_speed_zero_lock) s_speed_ema = 0.0f;
                 } else {
                     // ── กำลังวิ่งอยู่: กรองด้วย EMA ตามปกติ ──
                     s_speed_ema += SPEED_EMA_ALPHA * (raw - s_speed_ema);
@@ -96,6 +103,7 @@ void gps_update(){
        (now - s_last_recovery_ms) >= GPS_UART_RECOVER_MS){
         GPS_SERIAL.end();
         delay(5);
+        GPS_SERIAL.setRxBufferSize(GPS_RX_BUFFER);
         GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, -1);
         s_last_recovery_ms = now;
         s_last_data_ms = now;

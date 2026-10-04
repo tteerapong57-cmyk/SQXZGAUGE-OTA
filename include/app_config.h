@@ -65,8 +65,21 @@ constexpr float ALARM_ECT_HIGH_C   = 105.0f;
 constexpr float ALARM_BATT_LOW_V   = 11.5f;
 constexpr float ALARM_RPM_HIGH     = 9000.0f;
 constexpr float ALARM_SPEED_HIGH   = 160.0f;
-constexpr uint32_t ALARM_HYST_MS   = 2000;
+// Display scale / colour thresholds shared by every page (was hard-coded
+// separately in gauge_ui.cpp and gauge.cpp, so colours and alarms disagreed).
+constexpr float RPM_GAUGE_MAX      = 10000.0f;  // full-scale of RPM bars/graphs
+constexpr float ECT_COLD_C         = 50.0f;     // below this: "cold" colour
 constexpr uint32_t LOGGER_SAMPLE_MS = 100;
 constexpr uint32_t LOGGER_STOP_MS   = 3000;
 constexpr size_t LOGGER_MAX_SAMPLES = 300;
 
+
+// --- OTA firmware update (GitHub Releases) ---------------------------------
+// APP_VERSION is rewritten automatically by the GitHub Actions workflow from
+// the release tag (tag v7.11 -> "7.11"). Edit by hand only for local builds.
+#define APP_VERSION "7.10"
+
+#define OTA_GITHUB_OWNER   "tteerapong57-cmyk"
+#define OTA_GITHUB_REPO    "SQXZGAUGE-OTA"
+#define OTA_WIFI_TIMEOUT_MS 20000
+#define OTA_HTTP_TIMEOUT_MS 15000
