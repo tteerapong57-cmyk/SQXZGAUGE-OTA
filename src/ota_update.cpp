@@ -65,89 +65,39 @@ bool ota_take_wifi_setup_request() { return take_flag("ws"); }
 
 static TFT_eSPI *g_tft = nullptr;
 
-// ── polished boot-time status UI (direct TFT, LVGL is not running) ────────
-static constexpr uint16_t UI_BG      = 0x0841;  // deep navy
-static constexpr uint16_t UI_PANEL   = 0x10A2;  // blue-black panel
-static constexpr uint16_t UI_EDGE    = 0x29E5;
-static constexpr uint16_t UI_CYAN    = 0x07FF;
-static constexpr uint16_t UI_GREEN   = 0x07E0;
-static constexpr uint16_t UI_YELLOW  = 0xFFE0;
-static constexpr uint16_t UI_RED     = 0xF800;
-static constexpr uint16_t UI_MUTED   = 0x8C92;
-
-static void ui_badge(const char *text, uint16_t color) {
-    const int w = g_tft->textWidth(text, 2) + 14;
-    const int x = 320 - w - 10;
-    g_tft->fillRoundRect(x, 8, w, 20, 8, UI_PANEL);
-    g_tft->drawRoundRect(x, 8, w, 20, 8, color);
-    g_tft->setTextDatum(MC_DATUM);
-    g_tft->setTextColor(color, UI_PANEL);
-    g_tft->drawString(text, x + w/2, 18, 2);
-}
-
-static void ui_header(const char *title) {
-    g_tft->fillScreen(UI_BG);
-    g_tft->fillRect(0, 0, 320, 3, UI_CYAN);
-    g_tft->setTextDatum(ML_DATUM);
-    g_tft->setTextColor(UI_CYAN, UI_BG);
-    g_tft->drawString("SQXZ GAUGE", 10, 18, 2);
-    ui_badge("OTA", UI_CYAN);
-
-    g_tft->setTextDatum(TC_DATUM);
-    g_tft->setTextColor(TFT_WHITE, UI_BG);
-    g_tft->drawString(title, 160, 48, 4);
-
-    g_tft->setTextColor(UI_MUTED, UI_BG);
-    g_tft->drawString("FIRMWARE  v" APP_VERSION, 160, 73, 2);
-    g_tft->drawFastHLine(14, 84, 292, UI_EDGE);
-}
-
-static void ui_card_line(const char *text, uint16_t color, int y = 122, int font = 2) {
-    g_tft->fillRoundRect(14, 94, 292, 78, 12, UI_PANEL);
-    g_tft->drawRoundRect(14, 94, 292, 78, 12, UI_EDGE);
-    g_tft->setTextDatum(TC_DATUM);
-    g_tft->setTextColor(color, UI_PANEL);
-    g_tft->drawString(text, 160, y, font);
-}
-
+// ── tiny on-screen status helpers (direct TFT, LVGL is not running) ─────────
 static void ui_screen(const char *title) {
-    ui_header(title);
-    ui_card_line("Preparing...", UI_MUTED, 126, 2);
+    g_tft->fillScreen(TFT_BLACK);
+    g_tft->setTextDatum(TC_DATUM);
+    g_tft->setTextColor(TFT_CYAN, TFT_BLACK);
+    g_tft->drawString("OTA UPDATE", 160, 16, 4);
+    g_tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
+    g_tft->drawString("current v" APP_VERSION, 160, 52, 2);
+    g_tft->setTextColor(TFT_WHITE, TFT_BLACK);
+    g_tft->drawString(title, 160, 100, 4);
 }
 
 static void ui_line(const char *text, uint16_t color, int y = 150) {
-    const bool bottom = y >= 180;
-    const uint16_t bg = bottom ? UI_BG : UI_PANEL;
-    const int x = bottom ? 0 : 24;
-    const int w = bottom ? 320 : 272;
-    g_tft->fillRect(x, y - 12, w, 24, bg);
+    g_tft->fillRect(0, y, 320, 24, TFT_BLACK);
     g_tft->setTextDatum(TC_DATUM);
-    g_tft->setTextColor(color, bg);
+    g_tft->setTextColor(color, TFT_BLACK);
     g_tft->drawString(text, 160, y, 2);
 }
 
 static void ui_progress(int pct) {
-    pct = constrain(pct, 0, 100);
-    const int x = 22, y = 184, w = 276, h = 18;
-    g_tft->fillRoundRect(x, y, w, h, 8, UI_PANEL);
-    g_tft->drawRoundRect(x, y, w, h, 8, UI_EDGE);
-    if (pct > 0) {
-        const int fillW = max(2, ((w - 4) * pct) / 100);
-        g_tft->fillRoundRect(x + 2, y + 2, fillW, h - 4, 6, UI_GREEN);
-    }
+    const int x = 20, y = 190, w = 280, h = 22;
+    g_tft->drawRect(x, y, w, h, TFT_WHITE);
+    g_tft->fillRect(x + 2, y + 2, ((w - 4) * pct) / 100, h - 4, TFT_GREEN);
     char b[16];
     snprintf(b, sizeof(b), "%d%%", pct);
-    g_tft->fillRect(0, 207, 320, 28, UI_BG);
-    g_tft->setTextDatum(TC_DATUM);
-    g_tft->setTextColor(TFT_WHITE, UI_BG);
-    g_tft->drawString(b, 160, 216, 2);
+    ui_line(b, TFT_WHITE, 160);
 }
 
 [[noreturn]] static void finish(bool (*touch_is_down)(), const char *l1, uint16_t c) {
     ui_line(l1, c);
     delay(2500);
     // Wait for the finger to lift, otherwise the next boot would re-enter OTA.
-    ui_line("RELEASE TOUCH TO REBOOT", UI_YELLOW, 215);
+    ui_line("RELEASE TOUCH TO REBOOT", TFT_YELLOW, 215);
     const uint32_t tw = millis();
     while (touch_is_down && touch_is_down() && millis() - tw < 5000UL) delay(50);   // bounded: never hang here
     ESP.restart();
@@ -196,50 +146,38 @@ static bool fetch_version(String &ver, String &md5) {
     const char *ssid = ota_wifi_ssid();
     const char *pass = ota_wifi_pass();
     if (ssid[0] == 0) {
-        finish(touch_is_down, "NO WIFI: SET IT ON P08", UI_RED);
+        finish(touch_is_down, "NO WIFI: SET IT ON P08", TFT_RED);
     }
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, pass);
-    ui_line(ssid, UI_CYAN, 142);
+    ui_line(ssid, TFT_DARKGREY);
     const uint32_t t0 = millis();
-    uint32_t lastAnim = 0;
-    int dots = 0;
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < OTA_WIFI_TIMEOUT_MS) {
-        delay(120);
-        if (millis() - lastAnim >= 320) {
-            lastAnim = millis();
-            dots = (dots + 1) % 4;
-            char anim[16];
-            snprintf(anim, sizeof(anim), "CONNECTING%.*s", dots, "...");
-            ui_line(anim, UI_YELLOW, 112);
-        }
-    }
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < OTA_WIFI_TIMEOUT_MS) delay(250);
     if (WiFi.status() != WL_CONNECTED) {
-        finish(touch_is_down, "WIFI FAILED", UI_RED);
+        finish(touch_is_down, "WIFI FAILED", TFT_RED);
     }
 
     ui_screen("CHECKING UPDATE");
-    ui_line("CHECKING GITHUB RELEASE", UI_CYAN, 126);
     String newVer, md5;
     if (!fetch_version(newVer, md5)) {
         char m[48];
         if (g_http_code == 404)      snprintf(m, sizeof(m), "NO RELEASE YET (HTTP 404)");
         else if (g_http_code == 200) snprintf(m, sizeof(m), "BAD version.txt FORMAT");
         else                         snprintf(m, sizeof(m), "CANNOT READ version.txt (%d)", g_http_code);
-        finish(touch_is_down, m, UI_RED);
+        finish(touch_is_down, m, TFT_RED);
     }
     Serial.printf("[OTA] current=%s remote=%s\n", APP_VERSION, newVer.c_str());
 
     // "!=" (not ">") on purpose: publishing an older release rolls back.
     if (newVer == APP_VERSION) {
-        finish(touch_is_down, "ALREADY UP TO DATE", UI_GREEN);
+        finish(touch_is_down, "ALREADY UP TO DATE", TFT_GREEN);
     }
 
     ui_screen("DOWNLOADING");
     char nv[40];
-    snprintf(nv, sizeof(nv), "NEW FIRMWARE  v%s", newVer.c_str());
-    ui_line(nv, UI_YELLOW, 130);
+    snprintf(nv, sizeof(nv), "new version v%s", newVer.c_str());
+    ui_line(nv, TFT_YELLOW, 130);   // above the % line (y=160) so they never overlap
 
     WiFiClientSecure client;
     client.setInsecure();
@@ -247,18 +185,18 @@ static bool fetch_version(String &ver, String &md5) {
     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
     http.setTimeout(OTA_HTTP_TIMEOUT_MS);
     if (!http.begin(client, OTA_FIRMWARE_URL)) {
-        finish(touch_is_down, "HTTP BEGIN FAILED", UI_RED);
+        finish(touch_is_down, "HTTP BEGIN FAILED", TFT_RED);
     }
     const int code = http.GET();
     const int total = http.getSize();
     if (code != HTTP_CODE_OK || total <= 0) {
         Serial.printf("[OTA] firmware HTTP %d size %d\n", code, total);
         http.end();
-        finish(touch_is_down, "DOWNLOAD FAILED", UI_RED);
+        finish(touch_is_down, "DOWNLOAD FAILED", TFT_RED);
     }
     if (!Update.begin((size_t)total)) {
         http.end();
-        finish(touch_is_down, "NOT ENOUGH FLASH SPACE", UI_RED);
+        finish(touch_is_down, "NOT ENOUGH FLASH SPACE", TFT_RED);
     }
     Update.setMD5(md5.c_str());
 
@@ -288,9 +226,9 @@ static bool fetch_version(String &ver, String &md5) {
     if (written != total || !Update.end(true) || !Update.isFinished()) {
         Serial.printf("[OTA] failed written=%d/%d err=%s\n", written, total, Update.errorString());
         Update.abort();
-        finish(touch_is_down, "UPDATE FAILED (OLD FW KEPT)", UI_RED);
+        finish(touch_is_down, "UPDATE FAILED (OLD FW KEPT)", TFT_RED);
     }
 
     ui_screen("UPDATE OK");
-    finish(touch_is_down, "REBOOTING TO NEW FIRMWARE", UI_GREEN);
+    finish(touch_is_down, "REBOOTING TO NEW FIRMWARE", TFT_GREEN);
 }

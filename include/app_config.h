@@ -77,7 +77,7 @@ constexpr size_t LOGGER_MAX_SAMPLES = 300;
 // --- OTA firmware update (GitHub Releases) ---------------------------------
 // APP_VERSION is rewritten automatically by the GitHub Actions workflow from
 // the release tag (tag v7.11 -> "7.11"). Edit by hand only for local builds.
-#define APP_VERSION "1.1"
+#define APP_VERSION "1.2"
 
 #define OTA_GITHUB_OWNER   "tteerapong57-cmyk"
 #define OTA_GITHUB_REPO    "SQXZGAUGE-OTA"
