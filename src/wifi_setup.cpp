@@ -11,13 +11,14 @@ typedef bool (*TouchGet)(int16_t *, int16_t *);
 static TFT_eSPI *T;
 static TouchGet getTouch;
 
-static const uint16_t C_BG   = TFT_BLACK;
-static const uint16_t C_KEY  = 0x2104;   // dark grey
-static const uint16_t C_EDGE = 0x5AEB;   // mid grey
-static const uint16_t C_ACC  = TFT_CYAN;
-static const uint16_t C_OK   = TFT_GREEN;
-static const uint16_t C_WARN = TFT_YELLOW;
-static const uint16_t C_ERR  = TFT_RED;
+static const uint16_t C_BG   = 0x0841;   // deep navy
+static const uint16_t C_KEY  = 0x10A2;   // blue-black key/panel
+static const uint16_t C_EDGE = 0x29E5;   // blue-grey edge
+static const uint16_t C_ACC  = 0x07FF;   // cyan
+static const uint16_t C_OK   = 0x07E0;   // green
+static const uint16_t C_WARN = 0xFFE0;   // yellow
+static const uint16_t C_ERR  = 0xF800;   // red
+static const uint16_t C_MUTED = 0x8C92;
 
 struct Rect {
     int16_t x, y, w, h;
@@ -62,21 +63,36 @@ static void wait_tap(int16_t &x, int16_t &y) {
 
 static void header(const char *title, const char *sub = nullptr) {
     T->fillScreen(C_BG);
-    T->setTextDatum(TC_DATUM);
+    T->fillRect(0, 0, 320, 3, C_ACC);
+    T->setTextDatum(ML_DATUM);
     T->setTextColor(C_ACC, C_BG);
-    T->drawString(title, 160, 4, 4);
+    T->drawString("SQXZ GAUGE", 10, 18, 2);
+
+    const char *badge = "WIFI";
+    const int bw = T->textWidth(badge, 2) + 14;
+    T->fillRoundRect(320 - bw - 10, 8, bw, 20, 8, C_KEY);
+    T->drawRoundRect(320 - bw - 10, 8, bw, 20, 8, C_ACC);
+    T->setTextDatum(MC_DATUM);
+    T->setTextColor(C_ACC, C_KEY);
+    T->drawString(badge, 320 - bw/2 - 10, 18, 2);
+
+    T->setTextDatum(TC_DATUM);
+    T->setTextColor(TFT_WHITE, C_BG);
+    T->drawString(title, 160, 48, 4);
     if (sub) {
-        T->setTextColor(TFT_DARKGREY, C_BG);
-        T->drawString(sub, 160, 34, 2);
+        T->setTextColor(C_MUTED, C_BG);
+        T->drawString(sub, 160, 72, 2);
     }
+    T->drawFastHLine(14, 84, 292, C_EDGE);
 }
 
 static void center_msg(const char *l1, uint16_t c1, const char *l2 = nullptr, uint16_t c2 = TFT_WHITE) {
+    T->fillRoundRect(14, 96, 292, 68, 12, C_KEY);
+    T->drawRoundRect(14, 96, 292, 68, 12, C_EDGE);
     T->setTextDatum(MC_DATUM);
-    T->fillRect(0, 90, 320, 70, C_BG);
-    T->setTextColor(c1, C_BG);
-    T->drawString(l1, 160, l2 ? 105 : 120, 4);
-    if (l2) { T->setTextColor(c2, C_BG); T->drawString(l2, 160, 140, 2); }
+    T->setTextColor(c1, C_KEY);
+    T->drawString(l1, 160, l2 ? 118 : 128, 4);
+    if (l2) { T->setTextColor(c2, C_KEY); T->drawString(l2, 160, 146, 2); }
 }
 
 // ── network list ────────────────────────────────────────────────────────────
@@ -85,8 +101,8 @@ static Ap g_aps[24];
 static int g_apn = 0;
 
 static void scan() {
-    header("WIFI SETUP");
-    center_msg("SCANNING...", C_WARN);
+    header("WIFI SETUP", "SEARCHING FOR AVAILABLE NETWORKS");
+    center_msg("SCANNING", C_WARN, "Please wait");
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     delay(100);
@@ -117,30 +133,30 @@ static int list_screen() {
     int page = 0;
     const Rect bCancel = {4, 192, 100, 44}, bScan = {110, 192, 100, 44}, bMore = {216, 192, 100, 44};
     for (;;) {
-        header("SELECT WIFI");
+        header("SELECT WIFI", "TAP A NETWORK TO CONNECT");
         const int pages = g_apn ? (g_apn + PER - 1) / PER : 1;
-        char pg[12]; snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
-        T->setTextDatum(TR_DATUM); T->setTextColor(TFT_DARKGREY, C_BG);
-        T->drawString(pg, 316, 8, 2);
+        char pg[12]; snprintf(pg, sizeof(pg), "%d / %d", page + 1, pages);
+        T->setTextDatum(TR_DATUM); T->setTextColor(C_MUTED, C_BG);
+        T->drawString(pg, 316, 70, 2);
 
         Rect rows[PER];
         for (int i = 0; i < PER; i++) {
-            rows[i] = {4, (int16_t)(34 + i * 31), 312, 29};
+            rows[i] = {8, (int16_t)(88 + i * 21), 304, 20};
             const int idx = page * PER + i;
             if (idx >= g_apn) continue;
             draw_btn(rows[i], "", C_EDGE, TFT_WHITE);
             T->setTextDatum(ML_DATUM);
             T->setTextColor(TFT_WHITE, C_KEY);
             char nm[27]; strlcpy(nm, g_aps[idx].ssid, sizeof(nm));
-            T->drawString(nm, 12, rows[i].y + 15, 2);
+            T->drawString(nm, 16, rows[i].y + 10, 2);
             char r[12];
             T->setTextDatum(MR_DATUM);
-            if (g_aps[idx].open) { T->setTextColor(C_OK, C_KEY); T->drawString("OPEN", 308, rows[i].y + 15, 2); }
-            else { snprintf(r, sizeof(r), "%d", g_aps[idx].rssi); T->setTextColor(TFT_DARKGREY, C_KEY); T->drawString(r, 308, rows[i].y + 15, 2); }
+            if (g_aps[idx].open) { T->setTextColor(C_OK, C_KEY); T->drawString("OPEN", 304, rows[i].y + 10, 2); }
+            else { snprintf(r, sizeof(r), "%d", g_aps[idx].rssi); T->setTextColor(C_MUTED, C_KEY); T->drawString(r, 304, rows[i].y + 10, 2); }
         }
         if (g_apn == 0) {
             T->setTextDatum(MC_DATUM); T->setTextColor(C_WARN, C_BG);
-            T->drawString("NO NETWORKS FOUND", 160, 100, 4);
+            T->drawString("NO NETWORKS FOUND", 160, 122, 4);
         }
         draw_btn(bCancel, "CANCEL", C_ERR, TFT_WHITE);
         draw_btn(bScan, "RESCAN", C_ACC, TFT_WHITE);
@@ -272,16 +288,18 @@ static void fit_text(const char *src, char *out, size_t cap, int maxw, int font)
 
 static bool try_connect(const char *ssid, const char *pass) {
     const uint32_t TIMEOUT_MS = 15000UL;
-    const int bx = 20, by = 130, bw = 280, bh = 18;
+    const int bx = 24, by = 176, bw = 272, bh = 16;
 
-    header("CONNECTING");
+    header("CONNECTING WIFI", "TESTING NETWORK CONNECTION");
+    T->fillRoundRect(14, 94, 292, 64, 12, C_KEY);
+    T->drawRoundRect(14, 94, 292, 64, 12, C_EDGE);
     T->setTextDatum(TC_DATUM);
-    T->setTextColor(TFT_DARKGREY, C_BG);
-    T->drawString("NETWORK", 160, 52, 2);
-    char nm[40]; fit_text(ssid, nm, sizeof(nm), 296, 4);
-    T->setTextColor(TFT_WHITE, C_BG);
-    T->drawString(nm, 160, 76, 4);
-    T->drawRect(bx, by, bw, bh, TFT_WHITE);
+    T->setTextColor(C_ACC, C_KEY);
+    T->drawString("NETWORK", 160, 106, 2);
+    char nm[40]; fit_text(ssid, nm, sizeof(nm), 276, 4);
+    T->setTextColor(TFT_WHITE, C_KEY);
+    T->drawString(nm, 160, 130, 4);
+    T->drawRoundRect(bx, by, bw, bh, 8, C_EDGE);
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -295,13 +313,13 @@ static bool try_connect(const char *ssid, const char *pass) {
         const int sec = (int)(el / 1000UL);
         if (sec == lastSec) continue;
         lastSec = sec;
-        T->fillRect(bx + 2, by + 2, bw - 4, bh - 4, C_BG);
-        T->fillRect(bx + 2, by + 2, (int)(((bw - 4) * (uint64_t)el) / TIMEOUT_MS), bh - 4, C_WARN);
-        char t[16]; snprintf(t, sizeof(t), "%d / %d s", sec, (int)(TIMEOUT_MS / 1000UL));
-        T->fillRect(0, 158, 320, 20, C_BG);
+        const int fillW = (int)(((bw - 4) * (uint64_t)el) / TIMEOUT_MS);
+        T->fillRoundRect(bx + 2, by + 2, max(1, fillW), bh - 4, 6, C_WARN);
+        char t[24]; snprintf(t, sizeof(t), "CONNECTING  %d / %d s", sec, (int)(TIMEOUT_MS / 1000UL));
+        T->fillRect(0, 203, 320, 24, C_BG);
         T->setTextDatum(TC_DATUM);
-        T->setTextColor(TFT_DARKGREY, C_BG);
-        T->drawString(t, 160, 158, 2);
+        T->setTextColor(C_MUTED, C_BG);
+        T->drawString(t, 160, 215, 2);
     }
     return WiFi.status() == WL_CONNECTED;
 }
