@@ -177,7 +177,7 @@ static bool fetch_version(String &ver, String &md5) {
     ui_screen("DOWNLOADING");
     char nv[40];
     snprintf(nv, sizeof(nv), "new version v%s", newVer.c_str());
-    ui_line(nv, TFT_YELLOW);
+    ui_line(nv, TFT_YELLOW, 130);   // above the % line (y=160) so they never overlap
 
     WiFiClientSecure client;
     client.setInsecure();

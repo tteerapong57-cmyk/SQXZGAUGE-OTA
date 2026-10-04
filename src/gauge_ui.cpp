@@ -1114,7 +1114,7 @@ static void extended_pages_init(){
     {
         const int BY = 184, BH = 48;
         // WIFI: shows the saved SSID, tap twice = reboot into on-device WiFi setup
-        g_p8_btn_wifi = ext_metric(g_scr_health, 7, BY, 148, BH, "WIFI  (TAP = SETUP)", &g_p8_wifi_val);
+        g_p8_btn_wifi = ext_metric(g_scr_health, 7, BY, 148, BH, "WIFI", &g_p8_wifi_val);
         lv_obj_set_style_border_color(g_p8_btn_wifi, ACCENT_BLUE, 0);
         lv_obj_set_style_border_width(g_p8_btn_wifi, 2, 0);
         lv_label_set_long_mode(g_p8_wifi_val, LV_LABEL_LONG_CLIP);
@@ -1920,7 +1920,7 @@ static void extended_pages_update(){
             g_p8_wifi_armed = false;
             const char *sv = ota_wifi_ssid();
             if(g_p8_wifi_val){ lv_label_set_text(g_p8_wifi_val, sv[0] ? sv : "SET WIFI"); lv_obj_set_style_text_color(g_p8_wifi_val, sv[0] ? WHITE : ACCENT_WARN, 0); }
-            if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "WIFI  (TAP = SETUP)");
+            if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "WIFI");
         }
         // UPDATE button: confirmation window (3 s) expired -> disarm
         if(g_p8_update_armed_ms && now - g_p8_update_armed_ms > 3000UL){
@@ -4527,7 +4527,7 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
                     g_p8_wifi_armed_ms = millis();
                     lv_label_set_text(g_p8_wifi_val, "TAP AGAIN");
                     lv_obj_set_style_text_color(g_p8_wifi_val, ACCENT_WARN, 0);
-                    if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "REBOOT TO WIFI SETUP");
+                    if(g_p8_wifi_cap) lv_label_set_text(g_p8_wifi_cap, "WIFI SETUP");
                     return;
                 }
                 lv_label_set_text(g_p8_wifi_val, "REBOOTING");
@@ -4553,7 +4553,7 @@ void gauge_ui_handle_touch_release(int32_t x, int32_t y){
                     g_p8_update_armed_ms = millis();
                     lv_label_set_text(g_p8_update_val, "TAP AGAIN");
                     lv_obj_set_style_text_color(g_p8_update_val, ACCENT_WARN, 0);
-                    if(g_p8_update_cap) lv_label_set_text(g_p8_update_cap, "REBOOT TO UPDATE");
+                    if(g_p8_update_cap) lv_label_set_text(g_p8_update_cap, "FW UPDATE");
                     return;
                 }
                 lv_label_set_text(g_p8_update_val, "REBOOTING");

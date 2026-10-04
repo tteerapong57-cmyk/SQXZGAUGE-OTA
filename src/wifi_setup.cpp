@@ -261,22 +261,47 @@ static bool password_screen(const char *ssid, bool open, char *pass, size_t cap)
 }
 
 // ── connection test ─────────────────────────────────────────────────────────
+// Shorten text with "..." so it never runs past maxw pixels.
+static void fit_text(const char *src, char *out, size_t cap, int maxw, int font) {
+    strlcpy(out, src, cap);
+    bool cut = false;
+    while (strlen(out) > 1 && T->textWidth(out, font) > maxw) { out[strlen(out) - 1] = 0; cut = true; }
+    const size_t n = strlen(out);
+    if (cut && n > 3) strcpy(out + n - 3, "...");
+}
+
 static bool try_connect(const char *ssid, const char *pass) {
+    const uint32_t TIMEOUT_MS = 15000UL;
+    const int bx = 20, by = 130, bw = 280, bh = 18;
+
     header("CONNECTING");
-    T->setTextDatum(TC_DATUM); T->setTextColor(TFT_WHITE, C_BG);
-    T->drawString(ssid, 160, 60, 2);
+    T->setTextDatum(TC_DATUM);
+    T->setTextColor(TFT_DARKGREY, C_BG);
+    T->drawString("NETWORK", 160, 52, 2);
+    char nm[40]; fit_text(ssid, nm, sizeof(nm), 296, 4);
+    T->setTextColor(TFT_WHITE, C_BG);
+    T->drawString(nm, 160, 76, 4);
+    T->drawRect(bx, by, bw, bh, TFT_WHITE);
+
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     delay(100);
     WiFi.begin(ssid, pass);
     const uint32_t t0 = millis();
-    int dots = 0;
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000UL) {
-        delay(300);
-        char d[8]; dots = (dots % 6) + 1;
-        for (int i = 0; i < dots; i++) d[i] = '.';
-        d[dots] = 0;
-        center_msg(d, C_WARN);
+    int lastSec = -1;
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < TIMEOUT_MS) {
+        delay(100);
+        const uint32_t el = millis() - t0;
+        const int sec = (int)(el / 1000UL);
+        if (sec == lastSec) continue;
+        lastSec = sec;
+        T->fillRect(bx + 2, by + 2, bw - 4, bh - 4, C_BG);
+        T->fillRect(bx + 2, by + 2, (int)(((bw - 4) * (uint64_t)el) / TIMEOUT_MS), bh - 4, C_WARN);
+        char t[16]; snprintf(t, sizeof(t), "%d / %d s", sec, (int)(TIMEOUT_MS / 1000UL));
+        T->fillRect(0, 158, 320, 20, C_BG);
+        T->setTextDatum(TC_DATUM);
+        T->setTextColor(TFT_DARKGREY, C_BG);
+        T->drawString(t, 160, 158, 2);
     }
     return WiFi.status() == WL_CONNECTED;
 }
@@ -304,7 +329,8 @@ static bool try_connect(const char *ssid, const char *pass) {
             if (try_connect(ssid, pass)) {
                 ota_wifi_save(ssid, pass);
                 header("WIFI SAVED");
-                center_msg("CONNECTED", C_OK, ssid, TFT_WHITE);
+                char shown[40]; fit_text(ssid, shown, sizeof(shown), 300, 2);
+                center_msg("CONNECTED", C_OK, shown, TFT_WHITE);
                 delay(2000);
                 reboot();
             }
